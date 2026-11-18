@@ -1,0 +1,39 @@
+[build-system]
+requires = ["scikit-build-core>=0.11", "pybind11>=2.13"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "prase"
+version = "1.0.0"
+description = "Probabilistic reasoning and semantic embedding for knowledge graph alignment"
+readme = "README.md"
+authors = [{ name = "Zhiyuan Qi" }]
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.26", "scipy>=1.11", "huggingface_hub>=0.34"]
+
+[project.urls]
+Homepage = "https://github.com/qizhyuan/PRASE"
+Repository = "https://github.com/qizhyuan/PRASE"
+
+[project.optional-dependencies]
+train = ["torch>=2.2", "rapidfuzz>=3.8"]
+rdf = ["rdflib>=7.1"]
+
+[project.scripts]
+prase = "prase.cli:main"
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+cmake.version = ">=3.18"
+wheel.packages = ["src/prase"]
+
+[tool.cibuildwheel]
+build = ["cp311-*", "cp312-*", "cp313-*"]
+skip = ["*-musllinux_*", "*-win32", "*-manylinux_i686"]
+test-extras = ["rdf"]
+test-command = [
+  'python "{project}/tests/wheel_smoke.py"',
+  'python -m unittest discover -s "{project}/tests" -v',
+]
