@@ -16,6 +16,13 @@ The package provides:
 
 The original implementation released with the IJCAI 2021 paper is on the [`legacy`](https://github.com/qizhyuan/PRASE/tree/legacy) branch.
 
+## PRASEMap Web Application
+
+[PRASEMap](https://prasemap.qizhy.com/) is a web application built on PRASE, first presented as a demo at
+CIKM 2021 ([Qi et al., CIKM 2021](https://doi.org/10.1145/3459637.3481972)). In the browser you can upload
+two graphs or choose a built-in pair, run PARIS or PRASE, and review the matches. Approved and rejected
+pairs carry over to the next run.
+
 ## Installation
 
 PRASE requires Python 3.11 or newer. The native PARIS engine builds with CMake 3.18+ and a C++17 compiler.
