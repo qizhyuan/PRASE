@@ -1,3 +1,5 @@
+> **Legacy code.** This branch keeps the original implementation released with the IJCAI 2021 paper. The maintained PRASE package is on the [main branch](https://github.com/qizhyuan/PRASE).
+
 # PRASE-Python
 The code of paper "Unsupervised Knowledge Graph Alignment by Probabilistic Reasoning and Semantic Embedding" (in IJCAI)
 
