@@ -25,15 +25,26 @@ pairs carry over to the next run.
 
 ## Installation
 
-PRASE requires Python 3.11 or newer. The native PARIS engine builds with CMake 3.18+ and a C++17 compiler.
+PRASE requires Python 3.11 or newer and installs from [PyPI](https://pypi.org/project/prase/):
 
 ```console
 # PARIS, the pipelines, and the benchmark downloader.
-python -m pip install .
+python -m pip install prase
 # PyTorch and RapidFuzz for the embedding models.
-python -m pip install ".[train]"
+python -m pip install "prase[train]"
 # RDFLib for RDF input.
-python -m pip install ".[rdf]"
+python -m pip install "prase[rdf]"
+```
+
+The wheels for Linux (x86_64 and aarch64), Windows (x64), and macOS (Apple silicon) on Python 3.11 to 3.15 include the compiled PARIS engine. On other platforms pip builds the engine from source, which requires CMake 3.18+ and a C++17 compiler.
+
+To install from a clone of the repository:
+
+```console
+git clone https://github.com/qizhyuan/PRASE.git
+cd PRASE
+# PARIS with the C++ engine, built from source.
+python -m pip install .
 # The NumPy engine alone, without building the C++ engine.
 python -m pip install . --config-settings wheel.cmake=false
 ```
@@ -333,7 +344,7 @@ minimum = 0.2
 python -m prase run run.toml
 ```
 
-[`config.py`](src/prase/config.py) documents every run-file setting.
+[`config.py`](https://github.com/qizhyuan/PRASE/blob/main/src/prase/config.py) documents every run-file setting.
 
 ## Benchmarks
 
@@ -364,9 +375,13 @@ curl -O https://dl.fbaipublicfiles.com/fasttext/vectors-english/wiki-news-300d-1
 python -m zipfile -e wiki-news-300d-1M.vec.zip data
 ```
 
-`benchmarks/reproduce.py` runs the recipes in [`benchmarks/experiments.toml`](benchmarks/experiments.toml) and writes each run to `<output>/<experiment>/<dataset>/`. A run stops when its folder already holds a run, so give each reproduction a new `--output` directory and pass the same directory to `list` and `report`:
+`benchmarks/reproduce.py` runs the recipes in [`benchmarks/experiments.toml`](https://github.com/qizhyuan/PRASE/blob/main/benchmarks/experiments.toml) and writes each run to `<output>/<experiment>/<dataset>/`. A run stops when its folder already holds a run, so give each reproduction a new `--output` directory and pass the same directory to `list` and `report`. The script and the recipes are in the repository:
 
 ```console
+# Get the benchmark scripts and install PRASE with the embedding models.
+git clone https://github.com/qizhyuan/PRASE.git
+cd PRASE
+python -m pip install "prase[train]"
 # PARIS on every dataset.
 python benchmarks/reproduce.py run --method paris --all-datasets --output runs/reproduction
 # PRASE with BootEA and with MultiKE on every dataset.
