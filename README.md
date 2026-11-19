@@ -25,34 +25,71 @@ pairs carry over to the next run.
 
 ## Installation
 
-PRASE requires Python 3.11 or newer and installs from [PyPI](https://pypi.org/project/prase/):
+PRASE requires Python 3.11 or newer. Install it in one of two ways:
+
+- **From PyPI**: a released version with the C++ engine prebuilt. This is the usual choice.
+- **From the repository**: the latest code on `main` or a release by its tag, built on your machine.
+
+Each installs the same `prase` package, so use one or the other. Installing from the repository replaces a PyPI installation in the same environment, and the other way round.
+
+### From PyPI
+
+Run one of these commands:
 
 ```console
 # PARIS, the pipelines, and the benchmark downloader.
 python -m pip install prase
-# PyTorch and RapidFuzz for the embedding models.
+# Or with PyTorch and RapidFuzz for the embedding models.
 python -m pip install "prase[train]"
-# RDFLib for RDF input.
+# Or with RDFLib for RDF input.
 python -m pip install "prase[rdf]"
+# Or with both.
+python -m pip install "prase[train,rdf]"
 ```
 
 The wheels for Linux (x86_64 and aarch64), Windows (x64), and macOS (Apple silicon) on Python 3.11 to 3.15 include the compiled PARIS engine. On other platforms pip builds the engine from source, which requires CMake 3.18+ and a C++17 compiler.
 
-To install from a clone of the repository:
+### From the Repository
+
+Install from the repository instead of PyPI to get changes on `main` that have not been released yet. pip builds the C++ engine, which requires CMake 3.18+ and a C++17 compiler.
+
+Clone the repository, then run one of the install commands:
 
 ```console
 git clone https://github.com/qizhyuan/PRASE.git
 cd PRASE
-# PARIS with the C++ engine, built from source.
+# PARIS with the C++ engine.
 python -m pip install .
-# The NumPy engine alone, without building the C++ engine.
+# Or with the embedding models and RDF input.
+python -m pip install ".[train,rdf]"
+# Or the NumPy engine alone, without building the C++ engine.
 python -m pip install . --config-settings wheel.cmake=false
 ```
 
-Embedding models train on the CPU by default. For GPU training, install the CUDA build of PyTorch that the [PyTorch installer](https://pytorch.org/get-started/locally/) selects for your system, for example:
+To build a release instead of `main`, switch the clone to its tag before you install:
 
 ```console
+git switch --detach v1.0.0
+```
+
+pip can also install from GitHub without a clone. Run one of these:
+
+```console
+# The latest code on main.
+python -m pip install "prase[train] @ git+https://github.com/qizhyuan/PRASE.git"
+# Or a release, by its tag.
+python -m pip install "prase[train] @ git+https://github.com/qizhyuan/PRASE.git@v1.0.0"
+```
+
+### GPU Training
+
+Embedding models train on the CPU by default. For GPU training, install the CUDA build of PyTorch that the [PyTorch installer](https://pytorch.org/get-started/locally/) selects for your system first. Then install PRASE with the `train` extra, from PyPI or from the repository. pip keeps the CUDA build because it already meets PRASE's PyTorch requirement.
+
+```console
+# 1. The CUDA build of PyTorch.
 python -m pip install torch --index-url https://download.pytorch.org/whl/cu132
+# 2. PRASE with the embedding models, from PyPI.
+python -m pip install "prase[train]"
 ```
 
 The examples below select the GPU with `options={"device": "cuda"}`. Run files take `device = "cuda"` in the model options, and the benchmark runner takes `--device cuda`.
@@ -375,13 +412,28 @@ curl -O https://dl.fbaipublicfiles.com/fasttext/vectors-english/wiki-news-300d-1
 python -m zipfile -e wiki-news-300d-1M.vec.zip data
 ```
 
-`benchmarks/reproduce.py` runs the recipes in [`benchmarks/experiments.toml`](https://github.com/qizhyuan/PRASE/blob/main/benchmarks/experiments.toml) and writes each run to `<output>/<experiment>/<dataset>/`. A run stops when its folder already holds a run, so give each reproduction a new `--output` directory and pass the same directory to `list` and `report`. The script and the recipes are in the repository:
+`benchmarks/reproduce.py` runs the recipes in [`benchmarks/experiments.toml`](https://github.com/qizhyuan/PRASE/blob/main/benchmarks/experiments.toml) and writes each run to `<output>/<experiment>/<dataset>/`. A run stops when its folder already holds a run, so give each reproduction a new `--output` directory and pass the same directory to `list` and `report`.
+
+The scripts are in the repository, not in the PyPI package. Clone the repository and install PRASE in one of two ways, so that the scripts and the package come from the same version:
 
 ```console
-# Get the benchmark scripts and install PRASE with the embedding models.
+# Either: the scripts of the 1.0.0 release, with the prebuilt PyPI package of the same version.
 git clone https://github.com/qizhyuan/PRASE.git
 cd PRASE
-python -m pip install "prase[train]"
+git switch --detach v1.0.0
+python -m pip install "prase[train]==1.0.0"
+```
+
+```console
+# Or: the scripts on main, with PRASE built from the clone.
+git clone https://github.com/qizhyuan/PRASE.git
+cd PRASE
+python -m pip install ".[train]"
+```
+
+Then, in the clone:
+
+```console
 # PARIS on every dataset.
 python benchmarks/reproduce.py run --method paris --all-datasets --output runs/reproduction
 # PRASE with BootEA and with MultiKE on every dataset.
