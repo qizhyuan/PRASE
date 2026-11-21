@@ -373,8 +373,7 @@ def _save(store: StepCheckpoints, index: int, name: str, key: str, before: State
     for number, (label, alignment, values) in enumerate(context.observations):
         arrays.update(_alignment_arrays(f"observation{number}", alignment))
         meta["observations"].append({"label": label, "values": _plain(values)})
-    store.save(index, name, key, meta, arrays)
-    return True
+    return store.save(index, name, key, meta, arrays)
 
 
 def _restore(before: State, saved: dict) -> tuple[State, float, dict, list]:

@@ -47,7 +47,6 @@ import io
 import json
 import logging
 import math
-import os
 import re
 import sys
 from collections.abc import Iterator
@@ -62,6 +61,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from .errors import ConfigError, DataError
+from .files import Window, atomic_write_text, is_sealed, open_sealed, write_sealed
 
 if TYPE_CHECKING:
     from .embedding.base import TrainingData
@@ -69,7 +69,6 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger("prase")
 _FORMAT = 1
 MARKER = "prase-checkpoints.json"
-_STEP_FILES = ("step.json", "state.npz", "state.npz.tmp", "step.json.tmp")
 _OUTPUT_NAMES = re.compile(r"\d{2,}-.+|alignment\.tsv|run\.json")
 
 
@@ -305,19 +304,23 @@ def training_checkpoints(directory: str | Path, *, minutes: float = 10.0) -> Ite
         _TRAINING.reset(token)
 
 
-_HEADER = b"PRASE-TRAINING-CHECKPOINT"
+TRAINING_MAGIC = b"PRASE-TRAINING-CHECKPOINT"
+STEP_MAGIC = b"PRASE-STEP-CHECKPOINT"
+_MAGICS = (TRAINING_MAGIC, STEP_MAGIC)
 
 
 class TrainingCheckpoint:
     """The saved training state of one fit, keyed by its model identity, data, and seed.
 
-    The file starts with a SHA-256 digest of the serialized state, so that a
-    truncated or altered file is detected before any part of it is read.
+    The file is sealed (:mod:`prase.files`): its header holds the digest of
+    the serialized state, so a truncated or altered file is detected before
+    any part of it is read. Saving never stops training; a failed save is
+    logged and training continues.
     """
 
     def __init__(self, torch, settings: _TrainingSettings, key: str, device: str) -> None:
         self.torch, self.key, self.settings = torch, key, settings
-        self.path = settings.directory / f"{key}.pt"
+        self.path = settings.directory / f"{key}.ckpt"
         self.saved_at = perf_counter()
         self.payload = self._load(device)
 
@@ -338,7 +341,7 @@ class TrainingCheckpoint:
         if not self.path.is_file():
             return None
         try:
-            payload = decode_training_state(self.torch, self.path.read_bytes(), device)
+            payload = read_training_state(self.torch, self.path, device)
         except Exception as error:  # a damaged or unreadable file: train from the start
             self.discard(f"cannot be used ({type(error).__name__}: {error})")
             return None
@@ -356,33 +359,27 @@ class TrainingCheckpoint:
         return perf_counter() - self.saved_at >= self.settings.seconds
 
     def save(self, payload: dict[str, Any]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_name(self.path.name + ".tmp")
-        temporary.write_bytes(encode_training_state(self.torch, {"key": self.key, **payload}))
-        os.replace(temporary, self.path)
+        try:
+            write_training_state(self.torch, self.path, {"key": self.key, **payload})
+        except Exception as error:  # a full disk or a locked file must not end the training
+            _LOGGER.warning("Could not save the training checkpoint %s (%s: %s)", self.path, type(error).__name__,
+                            error)
+            return
         if self.path not in self.settings.written:
             self.settings.written.append(self.path)
         self.saved_at = perf_counter()
         _LOGGER.debug("Saved the training state after epoch %d to %s", payload.get("epoch", 0), self.path)
 
 
-def encode_training_state(torch, payload: dict[str, Any]) -> bytes:
-    """A training checkpoint file: a header with the SHA-256 digest of the serialized payload, then the payload."""
-    buffer = io.BytesIO()
-    torch.save(payload, buffer)
-    body = buffer.getvalue()
-    return b" ".join((_HEADER, str(_FORMAT).encode(), hashlib.sha256(body).hexdigest().encode())) + b"\n" + body
+def write_training_state(torch, path: str | Path, payload: dict[str, Any]) -> None:
+    """Seal a training checkpoint, streamed to disk without a copy in memory."""
+    write_sealed(path, TRAINING_MAGIC, lambda stream: torch.save(payload, stream))
 
 
-def decode_training_state(torch, data: bytes, device: str) -> dict:
-    """The payload of a training checkpoint file; an error when the file is damaged or of another format."""
-    header, _, body = data.partition(b"\n")
-    parts = header.split(b" ")
-    if len(parts) != 3 or parts[0] != _HEADER or parts[1] != str(_FORMAT).encode():
-        raise ValueError("the file is not a training checkpoint of this PRASE version")
-    if parts[2] != hashlib.sha256(body).hexdigest().encode():
-        raise ValueError("the file is damaged or incomplete")
-    return torch.load(io.BytesIO(body), map_location=device, weights_only=True)
+def read_training_state(torch, path: str | Path, device: str) -> dict:
+    """The payload of a sealed training checkpoint; an error when the file is damaged or of another kind."""
+    with open_sealed(path, TRAINING_MAGIC) as body:
+        return torch.load(body, map_location=device, weights_only=True)
 
 
 def training_key(model: object, data: TrainingData, seed: int) -> str | None:
@@ -434,7 +431,7 @@ class StepCheckpoints:
             if not directory.is_dir():
                 raise DataError(f"{directory} is a file, not a checkpoint directory")
             if any(directory.iterdir()):
-                if not (directory / MARKER).is_file():
+                if not _owned(directory):
                     raise DataError(f"{directory} holds files that PRASE did not write; choose a new or empty "
                                     "checkpoint directory")
                 if not resume:
@@ -443,59 +440,45 @@ class StepCheckpoints:
         return cls(directory, policy)
 
     def has_steps(self) -> bool:
-        return self.steps.is_dir() and any((folder / "step.json").is_file() for folder in self.steps.iterdir())
+        return self.steps.is_dir() and any(is_sealed(path, (STEP_MAGIC,)) for path in self.steps.glob("*.ckpt"))
 
     def claim(self) -> None:
         """Create the directory and its marker."""
         self.directory.mkdir(parents=True, exist_ok=True)
-        marker = self.directory / MARKER
-        if not marker.is_file():
-            marker.write_text(json.dumps({"format": _FORMAT, "written_by": "prase"}) + "\n", encoding="utf-8")
+        if not _owned(self.directory):
+            atomic_write_text(self.directory / MARKER, json.dumps(_MARKER_CONTENT) + "\n")
 
-    def folder(self, index: int, name: str) -> Path:
-        return self.steps / f"{index:02d}-{name}"
+    def file(self, index: int, name: str) -> Path:
+        return self.steps / f"{index:02d}-{name}.ckpt"
 
     def load(self, index: int, name: str, key: str) -> dict | None:
-        """The saved arrays and record of a step whose identity matches ``key``.
+        """The saved record and arrays of a step whose identity matches ``key``, or None.
 
-        None when there is no such checkpoint or its record or arrays do not
-        match the digests saved with them.
+        A damaged or altered file fails its digest and is not used.
         """
-        folder = self.folder(index, name)
-        try:
-            meta = json.loads((folder / "step.json").read_text(encoding="utf-8"))
-            if not isinstance(meta, dict) or meta.get("format") != _FORMAT or meta.get("key") != key:
-                return None
-            if meta.pop("record", None) != chain_key("record", meta):
-                _LOGGER.warning("Step %d (%s) runs again: its checkpoint record was altered", index, name)
-                return None
-            body = (folder / "state.npz").read_bytes()
-            if hashlib.sha256(body).hexdigest() != meta["arrays"]:
-                _LOGGER.warning("Step %d (%s) runs again: its checkpoint arrays are damaged", index, name)
-                return None
-            with np.load(io.BytesIO(body), allow_pickle=False) as arrays:
-                values = {name: arrays[name] for name in arrays.files}
-        except Exception:  # a missing or unreadable checkpoint: run the step again
+        path = self.file(index, name)
+        if not path.is_file():
             return None
-        return {"meta": meta, "arrays": values}
+        try:
+            meta, arrays = read_step_state(path)
+        except Exception as error:  # a damaged or unreadable checkpoint: run the step again
+            _LOGGER.warning("Step %d (%s) runs again: its checkpoint cannot be used (%s: %s)", index, name,
+                            type(error).__name__, error)
+            return None
+        if not isinstance(meta, dict) or meta.get("key") != key:
+            return None
+        return {"meta": meta, "arrays": arrays}
 
-    def save(self, index: int, name: str, key: str, meta: dict[str, Any], arrays: dict[str, np.ndarray]) -> None:
-        folder = self.folder(index, name)
-        folder.mkdir(parents=True, exist_ok=True)
-        # The record goes last, so that a step folder with a record always holds that record's arrays.
-        (folder / "step.json").unlink(missing_ok=True)
-        buffer = io.BytesIO()
-        np.savez(buffer, **arrays)
-        body = buffer.getvalue()
-        temporary = folder / "state.npz.tmp"
-        temporary.write_bytes(body)
-        os.replace(temporary, folder / "state.npz")
-        record = json.loads(json.dumps({"format": _FORMAT, "key": key, "arrays": hashlib.sha256(body).hexdigest(),
-                                        **meta}, default=_json_default))
-        record["record"] = chain_key("record", record)
-        temporary = folder / "step.json.tmp"
-        temporary.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        os.replace(temporary, folder / "step.json")
+    def save(self, index: int, name: str, key: str, meta: dict[str, Any], arrays: dict[str, np.ndarray]) -> bool:
+        """Seal the step's record and arrays in one file, and return whether that worked."""
+        path = self.file(index, name)
+        try:
+            write_step_state(path, {"key": key, **meta}, arrays)
+        except Exception as error:  # a full disk or a locked file must not end the run
+            _LOGGER.warning("Could not save the checkpoint of step %d (%s) to %s (%s: %s)", index, name, path,
+                            type(error).__name__, error)
+            return False
+        return True
 
     def finish(self) -> None:
         """Remove the checkpoints PRASE wrote, unless the policy keeps them. Other files stay."""
@@ -503,24 +486,52 @@ class StepCheckpoints:
             remove_checkpoints(self.directory)
 
 
+def write_step_state(path: str | Path, meta: dict[str, Any], arrays: dict[str, np.ndarray]) -> None:
+    """Seal a step checkpoint: its record as one JSON line, then its arrays as an ``.npz`` archive."""
+    record = json.dumps(meta, ensure_ascii=False, default=_json_default).encode("utf-8") + b"\n"
+
+    def write(stream) -> None:
+        stream.write(record)
+        np.savez(stream, **arrays)
+
+    write_sealed(path, STEP_MAGIC, write)
+
+
+def read_step_state(path: str | Path) -> tuple[Any, dict[str, np.ndarray]]:
+    """The record and arrays of a sealed step checkpoint; an error when the file is damaged or of another kind."""
+    with open_sealed(path, STEP_MAGIC) as body:
+        reader = io.BufferedReader(body)
+        meta = json.loads(reader.readline().decode("utf-8"))
+        with np.load(Window(body.stream, body.offset + reader.tell()), allow_pickle=False) as saved:
+            return meta, {name: saved[name] for name in saved.files}
+
+
+_MARKER_CONTENT = {"format": _FORMAT, "written_by": "prase"}
+
+
+def _owned(directory: Path) -> bool:
+    """Whether a checkpoint directory holds the marker that PRASE writes into its own directories."""
+    try:
+        return json.loads((directory / MARKER).read_text(encoding="utf-8")) == _MARKER_CONTENT
+    except (OSError, ValueError):
+        return False
+
+
 def remove_checkpoints(directory: str | Path) -> None:
-    """Remove the checkpoints that PRASE wrote in a checkpoint directory; other files, and other folders, stay."""
+    """Remove the checkpoint files that PRASE sealed in a directory it owns. Every other file stays.
+
+    A file is PRASE's when it starts with the header of a sealed checkpoint,
+    which also marks a temporary file that a stopped save left behind.
+    """
     directory = Path(directory)
-    if not (directory / MARKER).is_file():
+    if not _owned(directory):
         return
-    steps, training = directory / "steps", directory / "training"
-    if steps.is_dir():
-        for folder in steps.iterdir():
-            if folder.is_dir():
-                for name in _STEP_FILES:
-                    (folder / name).unlink(missing_ok=True)
-                _remove_if_empty(folder)
-        _remove_if_empty(steps)
-    if training.is_dir():
-        for path in training.iterdir():
-            if path.is_file() and path.name.endswith((".pt", ".pt.tmp")):
-                path.unlink()
-        _remove_if_empty(training)
+    for folder in (directory / "steps", directory / "training"):
+        if folder.is_dir():
+            for path in folder.iterdir():
+                if path.is_file() and is_sealed(path, _MAGICS):
+                    path.unlink(missing_ok=True)
+            _remove_if_empty(folder)
     (directory / MARKER).unlink(missing_ok=True)
     _remove_if_empty(directory)
 

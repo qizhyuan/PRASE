@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger("prase")
 _LOAD_ERROR: ImportError | None = None
 _REPORTED = False
-_API = 6
+_API = 7
 
 try:
     _paris = import_module(f"{__package__.rpartition('.')[0]}._paris")

@@ -383,6 +383,29 @@ class BenchmarkRunnerTest(unittest.TestCase):
             self.assertEqual(json.loads((target / "comparison.json").read_text(encoding="utf-8"))["measured"],
                              row["measured"])
 
+    def test_recipe_devices_and_other_datasets_stay_current(self):
+        catalog = copy.deepcopy(reproduce.CATALOG)
+        catalog["experiments"]["prase-bootea"]["method"].setdefault("options", {})["device"] = "cuda"
+        catalog["experiments"]["paris"]["datasets"] = ["MED-BBK-9K"]
+        own_device = reproduce.RunCase("prase-bootea", "D-W-15K-V2")
+        elsewhere = reproduce.RunCase("paris", "D-W-15K-V2")
+        with tempfile.TemporaryDirectory() as directory, patch.object(reproduce, "CATALOG", catalog):
+            root = Path(directory)
+            self.write_result(root, own_device, 0.7)
+            self.write_result(root, elsewhere, 0.66)
+            self.assertEqual(reproduce.planned_device("prase-bootea", "D-W-15K-V2", None), "cuda")
+            for case in (own_device, elsewhere):
+                self.assertEqual(reproduce._status(case, [root]), "Completed")
+            self.assertEqual(reproduce._status(own_device, [root], 0, "cuda"), "Completed")
+            with (patch.object(reproduce, "run", return_value={"measured": {"f1": 0.6}}) as run,
+                  patch.object(reproduce.logging, "basicConfig"), redirect_stdout(StringIO())):
+                reproduce.main(["run", "--method", "prase", "--model", "bootea", "--dataset", "D-W-15K-V2",
+                                "--output", directory, "--resume"])
+                reproduce.main(["run", "--method", "paris", "--dataset", "D-W-15K-V2", "--output", directory,
+                                "--resume"])
+            run.assert_not_called()
+            self.assertFalse((root / "history").exists())
+
     def test_supervised_folds_are_reused_only_with_the_same_identity(self):
         import numpy as np
 

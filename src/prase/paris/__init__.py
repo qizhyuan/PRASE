@@ -266,6 +266,12 @@ class Paris:
         and right entities approved for another left entity are left out.
         """
         self._check_embeddings(embeddings)
+        if isinstance(entity, bool) or not isinstance(entity, (int, np.integer)) \
+                or not 0 <= entity < self.left.num_entities:
+            raise DataError(f"entity must be a left entity index below {self.left.num_entities}")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ConfigError("limit must be a positive integer")
+        entity = int(entity)
         source, target, state = self.left_index, self.right_index, result.state
         start, stop = source.source_ptr[entity], source.source_ptr[entity + 1]
         head = source.source_head[start:stop]

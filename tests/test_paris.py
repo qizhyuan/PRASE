@@ -251,6 +251,18 @@ class ParisTest(unittest.TestCase):
         if len(results) == 2:
             self.assertEqual(results[0].alignment.pairs(), results[1].alignment.pairs())
 
+    def test_candidates_need_a_left_entity_index_and_a_positive_limit(self):
+        from prase import ConfigError, DataError
+
+        result = self.paris.run()
+        for entity in (-1, -2, self.left.num_entities, 1.0, True, "0"):
+            with self.subTest(entity=entity), self.assertRaisesRegex(DataError, "left entity index"):
+                self.paris.candidates(result, entity)
+        for limit in (0, -3, 1.5):
+            with self.subTest(limit=limit), self.assertRaisesRegex(ConfigError, "limit"):
+                self.paris.candidates(result, 0, limit=limit)
+        self.assertEqual(self.paris.candidates(result, np.int64(3)), self.paris.candidates(result, 3))
+
     def test_epsilon_below_one_is_rejected(self):
         from prase import ConfigError
 
@@ -320,17 +332,18 @@ class ParisTest(unittest.TestCase):
 @unittest.skipUnless(native.available(), f"native engine unavailable: {native.load_error()}")
 class NativeParityTest(unittest.TestCase):
     def compare(self, left, right, *, config=PYTHON, threads=3, **run):
+        """Both engines, at one and at ``threads`` threads, give the same results to the last bit."""
         python = Paris(left, right, config).run(**run)
-        compiled = Paris(left, right, replace(config, engine="native", threads=threads)).run(**run)
-        self.assertEqual(compiled.engine, "native")
-        self.assertEqual(python.alignment.left.tolist(), compiled.alignment.left.tolist())
-        self.assertEqual(python.alignment.right.tolist(), compiled.alignment.right.tolist())
-        np.testing.assert_allclose(python.alignment.score, compiled.alignment.score, rtol=1e-12, atol=1e-12)
-        for a, b in zip(python.predicates, compiled.predicates, strict=True):
-            self.assertEqual((a.left, a.right), (b.left, b.right))
-            self.assertAlmostEqual(a.left_in_right, b.left_in_right, places=12)
-            self.assertAlmostEqual(a.right_in_left, b.right_in_left, places=12)
-        self.assertEqual([s["matched"] for s in python.iterations], [s["matched"] for s in compiled.iterations])
+        for count in sorted({1, threads}):
+            compiled = Paris(left, right, replace(config, engine="native", threads=count)).run(**run)
+            self.assertEqual(compiled.engine, "native")
+            self.assertEqual(python.alignment.left.tolist(), compiled.alignment.left.tolist())
+            self.assertEqual(python.alignment.right.tolist(), compiled.alignment.right.tolist())
+            np.testing.assert_array_equal(python.alignment.score, compiled.alignment.score)
+            self.assertEqual(python.predicates, compiled.predicates)
+            np.testing.assert_array_equal(python.state.left_relations.values, compiled.state.left_relations.values)
+            np.testing.assert_array_equal(python.state.right_relations.values, compiled.state.right_relations.values)
+            self.assertEqual([s["matched"] for s in python.iterations], [s["matched"] for s in compiled.iterations])
 
     def test_matches_the_python_engine(self):
         for seed in range(4):
@@ -350,6 +363,20 @@ class NativeParityTest(unittest.TestCase):
             frozenset({(left.entities[reference[30, 0]], right.entities[reference[30, 1]])}),
         )
         self.compare(left, right, seeds=seeds, embeddings=embeddings, constraints=decisions.resolve(left, right))
+
+    def test_matches_with_tied_embeddings_at_every_thread_count(self):
+        # Right entities share vectors in pairs, so cosine scores tie exactly and break by the lower index.
+        left, right, reference = graph_pair(90, seed=11, drop=0.35, named=0.3)
+        rng = np.random.default_rng(3)
+        shared = rng.normal(size=((right.num_entities + 1) // 2, 5))
+        right_vectors = np.repeat(shared, 2, axis=0)[:right.num_entities]
+        left_vectors = rng.normal(size=(left.num_entities, 5))
+        left_vectors[reference[:, 0]] = right_vectors[reference[:, 1]]
+        embeddings = Embeddings(left_vectors, right_vectors)
+        for threads in (2, 3, 4):
+            with self.subTest(threads=threads):
+                self.compare(left, right, config=replace(PYTHON, embedding_weight=0.5), threads=threads,
+                             embeddings=embeddings)
 
     def test_matches_with_fixed_predicate_equivalences(self):
         left = KG.from_triples([("a", "p", "b")], [("b", "label", "shared")])

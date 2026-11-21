@@ -53,6 +53,7 @@ from prase.checkpoints import (
 )
 from prase.config import build_method
 from prase.datasets import BENCHMARK_NAMES, benchmark_folds, load_local_benchmark, verify_benchmark, verify_word_vectors
+from prase.files import atomic_write_text
 from prase.progress import Progress
 
 SUITE = Path(__file__).resolve().with_name("ijcai2021.toml")
@@ -395,10 +396,8 @@ def code_revision() -> dict:
 
 
 def write_record(path: Path, record: dict) -> None:
-    """Write through a temporary file, so that list and report never read a partial record."""
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    """Write a record whole, so that list and report never read a partial one."""
+    atomic_write_text(path, json.dumps(record, indent=2, ensure_ascii=False) + "\n")
 
 
 @dataclass
@@ -584,18 +583,15 @@ def outdated(row: dict, seed: int | None = None, device: str | None = None) -> l
         reasons.append(f"seed {row.get('seed')}")
     if device is not None and row.get("device") != device:
         reasons.append(f"device {row.get('device') or 'unknown'}")
-    if row.get("dataset") not in CATALOG["experiments"][experiment]["datasets"]:
-        return [*reasons, "dataset removed from the recipe"]
+    # A recipe runs on its configured datasets by default and on any other benchmark on request.
+    if row.get("dataset") not in BENCHMARK_NAMES:
+        return [*reasons, "unknown dataset"]
     try:
         expected = recipe_method(experiment, row["dataset"], _saved_rounds(experiment, row))
     except SystemExit:
         return [*reasons, "rounds no longer apply"]
-    saved = dict(row.get("method", {}))
-    if isinstance(saved.get("options"), dict):
-        # The device changes the speed, not the method.
-        saved["options"] = {key: value for key, value in saved["options"].items() if key != "device"}
-        if not saved["options"] and "options" not in expected:
-            del saved["options"]
+    # The device changes the speed, not the method; a run's device is compared on its own.
+    expected, saved = (_without_device(method) for method in (expected, row.get("method", {})))
     if expected["name"] == "prase":
         # A PRASE method without a round count runs one round.
         expected.setdefault("rounds", 1)
@@ -604,6 +600,15 @@ def outdated(row: dict, seed: int | None = None, device: str | None = None) -> l
     if changes:
         reasons.append("changed " + ", ".join(changes[:3]) + (" and more" if len(changes) > 3 else ""))
     return reasons
+
+
+def _without_device(method: dict) -> dict:
+    method = dict(method)
+    if isinstance(method.get("options"), dict):
+        method["options"] = {key: value for key, value in method["options"].items() if key != "device"}
+        if not method["options"]:
+            del method["options"]
+    return method
 
 
 def _differences(expected, saved, where: str) -> list[str]:

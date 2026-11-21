@@ -133,7 +133,7 @@ private:
 
 PYBIND11_MODULE(_paris, module) {
     module.doc() = "Native PARIS iteration for prase.paris";
-    module.attr("API_VERSION") = 6;
+    module.attr("API_VERSION") = 7;
     py::class_<PyEngine>(module, "Engine")
         .def(py::init<const py::dict&, const py::dict&, double, double, double, double, double, int>())
         .def("iterate", &PyEngine::iterate);

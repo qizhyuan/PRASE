@@ -21,7 +21,7 @@ PRASE and embedding-only training take any of six embedding models in PyTorch, o
 | MTransE | Chen et al., IJCAI 2017 | `"mtranse"` |
 | MultiKE | Zhang et al., IJCAI 2019 | `"multike"` |
 
-PARIS runs on a C++ engine or a NumPy engine, which give the same alignments up to floating-point rounding. Every run records its intermediate alignments and scores, and a [manual review](#manual-review) keeps approved pairs and never matches rejected ones. The PARIS authors publish their Java implementation at [dig-team/PARIS](https://github.com/dig-team/PARIS). The implementation released with the IJCAI 2021 paper is on the [`legacy`](https://github.com/qizhyuan/PRASE/tree/legacy) branch.
+PARIS runs on a C++ engine or a NumPy engine, which give the same alignments and scores to the last bit, with any number of threads. Every run records its intermediate alignments and scores, and a [manual review](#manual-review) keeps approved pairs and never matches rejected ones. The PARIS authors publish their Java implementation at [dig-team/PARIS](https://github.com/dig-team/PARIS). The implementation released with the IJCAI 2021 paper is on the [`legacy`](https://github.com/qizhyuan/PRASE/tree/legacy) branch.
 
 ## PRASEMap Web Application
 

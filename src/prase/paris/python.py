@@ -87,8 +87,8 @@ def _pass(
     ``(entities, counterparts, probabilities)``.
     """
     theta = config.theta
-    relation_keys, relation_weights = [], []
-    norm = np.zeros(source.num_predicates)
+    # Relation statistics are summed once, in fact order, as the native engine sums them.
+    relation_keys, relation_weights, norm_keys, norm_weights = [], [], [], []
     updates = []
     scored = []
     for first, last in _chunks(source):
@@ -104,7 +104,8 @@ def _pass(
         # Relation statistics: weighted support for q ⊆ q' over matched facts.
         has = x_match >= 0
         weight = head_prob * x_prob
-        norm += np.bincount(q[has], weights=weight[has], minlength=source.num_predicates)
+        norm_keys.append(q[has])
+        norm_weights.append(weight[has])
         sel = np.flatnonzero(has & (x_prob > 0.0))
         keys = head_match[sel] * target.num_entities + x_match[sel]
         row, position = _expand(
@@ -125,6 +126,9 @@ def _pass(
 
     keys = np.concatenate(relation_keys) if relation_keys else np.zeros(0, dtype=np.int64)
     weights = np.concatenate(relation_weights) if relation_weights else np.zeros(0)
+    norm = np.bincount(np.concatenate(norm_keys) if norm_keys else np.zeros(0, dtype=np.int64),
+                       weights=np.concatenate(norm_weights) if norm_weights else np.zeros(0),
+                       minlength=source.num_predicates).astype(np.float64)
     unique, inverse = np.unique(keys, return_inverse=True)
     support = np.bincount(inverse, weights=weights, minlength=len(unique))
     scale = config.smoothing + norm[unique // target.num_predicates]

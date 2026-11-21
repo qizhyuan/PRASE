@@ -29,6 +29,7 @@ import numpy as np
 from . import __version__
 from .alignment import write_predicate_matches
 from .errors import DataError
+from .files import atomic_write_text
 
 if TYPE_CHECKING:
     from .kg import KG
@@ -112,7 +113,7 @@ class RunWriter:
 
 
 _STEP_FOLDER = re.compile(r"\d{2,}-.+")
-_STEP_OUTPUTS = ("alignment.tsv", "predicates.tsv", "proposals.tsv", "embeddings.npz", "step.json", "step.tmp")
+_STEP_OUTPUTS = ("alignment.tsv", "predicates.tsv", "proposals.tsv", "embeddings.npz", "step.json")
 
 
 def _remove_step_outputs(folder: Path) -> None:
@@ -175,9 +176,7 @@ def _record(record: StepRecord) -> dict[str, Any]:
 
 
 def _write_json(path: Path, value: Any) -> None:
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False, default=_default) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    atomic_write_text(path, json.dumps(value, indent=2, ensure_ascii=False, default=_default) + "\n")
 
 
 def _default(value: Any) -> Any:

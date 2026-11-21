@@ -23,9 +23,12 @@ struct Update {
 };
 
 // What one thread computes over a contiguous range of source entities.
+// The relation statistics of one range of entities, as (key, weight) terms in fact order. The terms of
+// all ranges are summed in order afterwards, so every thread count gives the same sums as one thread
+// and as the NumPy engine.
 struct Partial {
-    std::vector<double> norm;
-    std::unordered_map<Index, double> support;
+    std::vector<std::pair<Index, double>> norm;
+    std::vector<std::pair<Index, double>> support;
     std::vector<Update> updates;
     Index evidence = 0;
 };
@@ -61,7 +64,6 @@ struct Pass {
     const Vectors* vectors;  // Set when embedding similarity is used.
 
     void run(Index first, Index last, Partial& out) const {
-        out.norm.assign(static_cast<std::size_t>(source.num_predicates), 0.0);
         std::unordered_map<Index, double> products;
         const Index* pairs_end = target.pair_keys + target.num_pairs;
         for (Index x = first; x < last; ++x) {
@@ -79,12 +81,13 @@ struct Pass {
                 const Index q = source.source_pred[fact];
                 if (x_match >= 0) {
                     const double weight = head_prob * x_prob;
-                    out.norm[static_cast<std::size_t>(q)] += weight;
+                    out.norm.emplace_back(q, weight);
                     if (x_prob > 0.0) {
                         const Index key = head_match * target.num_entities + x_match;
                         for (const Index* it = std::lower_bound(target.pair_keys, pairs_end, key);
                              it != pairs_end && *it == key; ++it) {
-                            out.support[q * target.num_predicates + target.pair_pred[it - target.pair_keys]] += weight;
+                            const Index predicate = target.pair_pred[it - target.pair_keys];
+                            out.support.emplace_back(q * target.num_predicates + predicate, weight);
                         }
                     }
                 }
@@ -203,11 +206,11 @@ PassResult run_pass(const Pass& pass, const std::vector<Index>& fixed, int threa
     std::vector<double> norm(static_cast<std::size_t>(pass.source.num_predicates), 0.0);
     std::unordered_map<Index, double> support;
     for (const auto& partial : partials) {
-        for (std::size_t q = 0; q < norm.size() && !partial.norm.empty(); ++q) {
-            norm[q] += partial.norm[q];
+        for (const auto& [q, weight] : partial.norm) {
+            norm[static_cast<std::size_t>(q)] += weight;
         }
-        for (const auto& [key, value] : partial.support) {
-            support[key] += value;
+        for (const auto& [key, weight] : partial.support) {
+            support[key] += weight;
         }
         result.updates.insert(result.updates.end(), partial.updates.begin(), partial.updates.end());
         result.evidence += partial.evidence;

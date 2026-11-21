@@ -90,14 +90,24 @@ class Embeddings:
         return self.left.shape[1]
 
     def cosine(self, left: np.ndarray, right: np.ndarray) -> np.ndarray:
-        """Cosine similarity of each ``(left[k], right[k])`` pair. Zero vectors score 0."""
+        """Cosine similarity of each ``(left[k], right[k])`` pair. Zero vectors score 0.
+
+        The sums run over the dimensions in order, in float64, as the native
+        PARIS engine computes them, so both engines give the same scores to the
+        last bit and break ties alike.
+        """
         result = np.empty(len(left), dtype=np.float64)
         rows = max(1, _BLOCK_ENTRIES // (4 * self.dim))
         for start in range(0, len(left), rows):
-            a = self.left[left[start:start + rows]].astype(np.float64)
-            b = self.right[right[start:start + rows]].astype(np.float64)
-            norms = np.sqrt(np.einsum("ij,ij->i", a, a) * np.einsum("ij,ij->i", b, b))
-            dots = np.einsum("ij,ij->i", a, b)
+            # One contiguous row per dimension.
+            a = np.ascontiguousarray(self.left[left[start:start + rows]].T, dtype=np.float64)
+            b = np.ascontiguousarray(self.right[right[start:start + rows]].T, dtype=np.float64)
+            dots, left_norms, right_norms, product = (np.zeros(a.shape[1]) for _ in range(4))
+            for x, y in zip(a, b, strict=True):
+                np.add(dots, np.multiply(x, y, out=product), out=dots)
+                np.add(left_norms, np.multiply(x, x, out=product), out=left_norms)
+                np.add(right_norms, np.multiply(y, y, out=product), out=right_norms)
+            norms = np.sqrt(left_norms * right_norms)
             result[start:start + rows] = np.divide(dots, norms, out=np.zeros_like(dots), where=norms > 0)
         return result
 

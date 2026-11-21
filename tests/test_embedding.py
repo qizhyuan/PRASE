@@ -213,7 +213,7 @@ class TrainingTest(unittest.TestCase):
                         with (patch.object(SeedValidation, "checkpoint", interrupted_after_epoch_17),
                               self.assertRaises(_Interrupt)):
                             model.fit(data, seed=0)
-                        self.assertEqual(len(list(folder.glob("*.pt"))), 1)
+                        self.assertEqual(len(list(folder.glob("*.ckpt"))), 1)
                         with self.assertLogs("prase", "INFO") as logs:
                             resumed = model.fit(data, seed=0)
                     self.assertTrue(any("resumed after epoch 17" in line for line in logs.output))
@@ -221,7 +221,7 @@ class TrainingTest(unittest.TestCase):
                     np.testing.assert_array_equal(resumed.right, plain.right)
                     self.assertEqual(resumed.info, plain.info)
                     # The finished fit stays saved, and the same fit again returns it without training.
-                    self.assertEqual(len(list(folder.glob("*.pt"))), 1)
+                    self.assertEqual(len(list(folder.glob("*.ckpt"))), 1)
                     with training_checkpoints(folder, minutes=0), self.assertLogs("prase", "INFO") as logs:
                         reused = model.fit(data, seed=0)
                     self.assertTrue(any("reused the finished fit" in line for line in logs.output))
@@ -239,7 +239,7 @@ class TrainingTest(unittest.TestCase):
         self.assertNotEqual(training_key(model, data, 0), training_key(create_model("gcnalign", epochs=20, dim=9),
                                                                        data, 0))
         with tempfile.TemporaryDirectory() as directory:
-            (Path(directory) / f"{training_key(model, data, 0)}.pt").write_bytes(b"not a checkpoint")
+            (Path(directory) / f"{training_key(model, data, 0)}.ckpt").write_bytes(b"not a checkpoint")
             with training_checkpoints(directory, minutes=0), self.assertLogs("prase", "WARNING") as logs:
                 again = model.fit(data, seed=0)
         self.assertIn("cannot be used", logs.output[0])
@@ -252,7 +252,7 @@ class TrainingTest(unittest.TestCase):
         """Damage each part of a real checkpoint in several ways: every fit must still finish."""
         import torch
 
-        from prase.checkpoints import decode_training_state, encode_training_state, training_key
+        from prase.checkpoints import read_training_state, training_key, write_training_state
         from prase.embedding.common import SeedValidation
 
         left, right, reference = graph_pair(40, seed=3)
@@ -272,22 +272,23 @@ class TrainingTest(unittest.TestCase):
                 model = create_model(name, **{**options[name], "epochs": 20})
                 plain = model.fit(data, seed=0)
                 with tempfile.TemporaryDirectory() as directory:
-                    file = Path(directory) / f"{training_key(model, data, 0)}.pt"
+                    file = Path(directory) / f"{training_key(model, data, 0)}.ckpt"
                     with training_checkpoints(directory, minutes=0):
                         with (patch.object(SeedValidation, "checkpoint", interrupted_after_epoch_15),
                               self.assertRaises(_Interrupt)):
                             model.fit(data, seed=0)
                     genuine = file.read_bytes()
-                    payload = decode_training_state(torch, genuine, "cpu")
+                    payload = read_training_state(torch, file, "cpu")
                     # A changed byte fails the digest, so the file is not used at all.
                     damaged = bytearray(genuine)
                     damaged[-10] ^= 0xFF
-                    cases = [("a changed byte", bytes(damaged), True)]
-                    cases += [(description, encode_training_state(torch, mutated), rejected)
-                              for description, mutated, rejected in _mutations(torch, payload)]
+                    cases = [("a changed byte", bytes(damaged), True), *_mutations(torch, payload)]
                     for description, content, rejected in cases:
                         with self.subTest(model=name, damage=description):
-                            file.write_bytes(content)
+                            if isinstance(content, bytes):
+                                file.write_bytes(content)
+                            else:  # damage sealed with a new digest must fail the checks of each part
+                                write_training_state(torch, file, content)
                             with training_checkpoints(directory, minutes=0):
                                 again = model.fit(data, seed=0)
                             self.assertEqual(again.left.shape, plain.left.shape)
@@ -297,6 +298,29 @@ class TrainingTest(unittest.TestCase):
                                 np.testing.assert_array_equal(again.right, plain.right)
         finally:
             shutil.rmtree(vectors.parent)
+
+    def test_checkpoint_files_stream_without_a_copy_in_memory(self):
+        import tracemalloc
+
+        import torch
+
+        from prase.checkpoints import read_training_state, write_training_state
+
+        payload = {"key": "k", "tensors": [torch.randn(16 * 1024 * 1024)]}  # 64 MiB
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fit.ckpt"
+            tracemalloc.start()
+            try:
+                write_training_state(torch, path, payload)
+                _, saving = tracemalloc.get_traced_memory()
+                tracemalloc.reset_peak()
+                loaded = read_training_state(torch, path, "cpu")
+                _, loading = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+            self.assertTrue(torch.equal(loaded["tensors"][0], payload["tensors"][0]))
+        self.assertLess(saving, 8 * 2**20)
+        self.assertLess(loading, 8 * 2**20)
 
     def test_training_keys_follow_files_settings_and_code(self):
         from prase.checkpoints import model_identity, training_key
