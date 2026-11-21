@@ -209,6 +209,17 @@ class AlignmentTest(unittest.TestCase):
             loaded = Alignment.read(path, left, right)
         self.assertEqual(list(loaded), list(alignment))
 
+    def test_pair_files_reject_scores_that_are_not_finite(self):
+        left = KG.from_triples([("a", "p", "b")])
+        right = KG.from_triples([("x", "p", "y")])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "seeds.tsv"
+            for score in ("nan", "inf"):
+                with self.subTest(score=score):
+                    path.write_text(f"a\tx\t{score}\nb\ty\t0.8\n", encoding="utf-8")
+                    with self.assertRaisesRegex(DataError, r"seeds.tsv:1: the score must be a finite number"):
+                        Alignment.read(path, left, right)
+
     def test_evaluation(self):
         alignment = Alignment([0, 1, 2], [0, 2, 1], [0.9, 0.4, 0.2])
         scores = evaluate(alignment, [(0, 0), (1, 1), (2, 2), (3, 3)])

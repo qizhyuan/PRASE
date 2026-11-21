@@ -9,21 +9,25 @@ import numpy as np
 
 from ..alignment import Alignment
 from ..errors import ConfigError, DataError
-from ..kg import RELATION
 from .base import Embeddings, TrainingData
 from .common import (
-    SeedValidation, check_device, finite_number, nearest_neighbors, positive_int, to_embeddings, training_runtime,
+    SeedValidation, check_device, finite_number, is_sorted_keys, is_tensor, positive_int, to_embeddings,
+    training_runtime,
 )
 
 
 class BootEA:
-    """TransE-style training with iterative bootstrapping of new alignment labels.
+    """TransE-style training with iterative bootstrapping of new alignment labels, as OpenEA implements it.
 
-    Training uses the graph triples, the seed pairs, and triples swapped
-    through the seeds and the bootstrapped labels. Every ``bootstrap_every``
-    epochs, mutual nearest neighbors with a cosine above ``sim_th`` become
-    labels, except rejected pairs. Counterparts are ranked by cross-domain similarity local scaling
-    (CSLS) over ``k`` neighbors, and proposals are mutual nearest neighbors.
+    Training uses the triples of both graphs, whose relations stay separate,
+    and the triples swapped through the seed pairs and the bootstrapped
+    labels. Every ``bootstrap_every`` epochs, each candidate's ``k`` most
+    similar counterparts with a cosine above ``sim_th`` form a bipartite
+    graph, and a greedy maximum-weight matching of it, OpenEA's default
+    heuristic, gives the new labels. The labels then replace earlier ones
+    that are less similar. Rejected pairs never become labels. Counterparts
+    are ranked by cross-domain similarity local scaling (CSLS) over ``k``
+    neighbors, and proposals are mutual nearest neighbors.
 
     ``epochs`` caps training. Validation MRR is checked every ten epochs,
     starting at epoch 50 or after two bootstrap updates, whichever comes later.
@@ -87,7 +91,7 @@ class BootEA:
         torch, generator = training_runtime(self.device, seed)
         validation = SeedValidation(
             torch, data, seed, self.device, self.epochs, start=max(50, 2 * self.bootstrap_every),
-            patience=self.patience, metric="csls", csls_k=self.k, distractors=2048,
+            patience=self.patience, metric="csls", csls_k=self.k, distractors=2048, model=self,
         )
         left_indices, right_indices = (np.sort(pool) for pool in validation.training.candidates)
         left, right = self._train(torch, generator, validation, left_indices, right_indices)
@@ -106,30 +110,25 @@ class BootEA:
         if entity_count * entity_count * predicate_count > 2**63:
             raise DataError("BootEA's triple index exceeds the supported integer range")
 
-        shared_relations = {predicate.name: index for index, predicate in enumerate(left_graph.predicates)
-                            if predicate.kind == RELATION}
-        right_relations = [shared_relations.get(predicate.name, len(left_graph.predicates) + index)
-                           for index, predicate in enumerate(right_graph.predicates)]
-        triples = set(map(tuple, left_graph.relation_triples.tolist()))
-        triples.update(
-            (head + left_size, right_relations[predicate], tail + left_size)
-            for head, predicate, tail in right_graph.relation_triples.tolist()
-        )
-        if not triples:
+        # Triple sets are sorted unique keys; their rows are the triples in sorted order.
+        keys = _TripleKeys(torch, entity_count, predicate_count, self.device)
+        triples = keys.rows(keys.of(_graph_triples(left_graph, right_graph)))
+        if not len(triples):
             raise DataError("BootEA requires relation triples")
-        seed_pairs = [(i, j + left_size) for i, j in data.seed_pairs]
-        seed_indices = torch.tensor(seed_pairs, dtype=torch.long, device=self.device)
-        base_triples = triples | _swapped_triples(triples, seed_pairs)
-        candidate_rows = set(left_indices) | {left_size + index for index in right_indices}
-        bootstrap_triples = {row for row in triples if row[0] in candidate_rows or row[2] in candidate_rows}
+        seed_indices = torch.tensor(data.seeds, dtype=torch.long, device=self.device)
+        seed_indices[:, 1] += left_size
+        base_keys = keys.union(keys.of(triples), keys.of(_swapped_triples(torch, triples, seed_indices, entity_count)))
         left_rows = torch.tensor(left_indices, dtype=torch.long, device=self.device)
         right_rows = torch.tensor(right_indices, dtype=torch.long, device=self.device) + left_size
+        candidate_rows = torch.zeros(entity_count, dtype=torch.bool, device=self.device)
+        candidate_rows[left_rows] = candidate_rows[right_rows] = True
+        bootstrap_triples = triples[candidate_rows[triples[:, 0]] | candidate_rows[triples[:, 2]]]
         left_position = {entity: row for row, entity in enumerate(left_indices.tolist())}
         right_position = {entity: row for row, entity in enumerate(right_indices.tolist())}
         rejected = {(left_position[i], right_position[j]) for i, j in data.rejected_pairs
                     if i in left_position and j in right_position}
-        training_triples = _triples_tensor(torch, base_triples, self.device)
-        known_positives = _positive_keys(torch, training_triples, entity_count, predicate_count)
+        training_triples = keys.rows(base_keys)
+        known_positives = base_keys
 
         entities = _unit_parameters(torch, entity_count, self.dim, self.device, generator)
         relations = _unit_parameters(torch, predicate_count, self.dim, self.device, generator)
@@ -140,12 +139,36 @@ class BootEA:
         alignment_optimizer = torch.optim.Adagrad(tables, **optimizer_options)
         neighbors = (None, None)
         pseudo_labels = {}
-        previous_swaps = set()
+        previous_swaps = keys.empty
 
         def encode():
             return entities[:left_size].detach(), entities[left_size:].detach()
 
-        for epoch in range(1, self.epochs + 1):
+        def state_fits(saved):
+            limit = entity_count * predicate_count * entity_count
+            neighbors = saved["neighbors"]
+            return (is_tensor(torch, saved["labels"], torch.long, 2, 2, limits=(len(left_rows), len(right_rows)))
+                    and is_sorted_keys(torch, saved["swaps"], limit)
+                    and is_sorted_keys(torch, saved["known_positives"], limit)
+                    and isinstance(neighbors, list) and len(neighbors) == 2
+                    and all(table is None or is_tensor(torch, table, torch.int32, 2, self._neighbor_count(size),
+                                                       limits=size, rows=size)
+                            for table, size in zip(neighbors, (left_size, right_size), strict=True)))
+
+        def state():
+            labels = torch.tensor(list(pseudo_labels.items()), dtype=torch.long).reshape(-1, 2)
+            return {"labels": labels, "swaps": previous_swaps, "known_positives": known_positives,
+                    "neighbors": list(neighbors)}
+
+        first = validation.resume(generator, tables, (optimizer, alignment_optimizer), best=encode, check=state_fits,
+                                  state=state)
+        if first > 1:
+            saved = validation.saved_state()
+            pseudo_labels = dict(map(tuple, saved["labels"].tolist()))
+            previous_swaps, known_positives = saved["swaps"], saved["known_positives"]
+            neighbors = tuple(saved["neighbors"])
+
+        for epoch in range(first, self.epochs + 1):
             order = torch.randperm(len(training_triples), device=self.device, generator=generator)
             for batch in order.split(self.batch_size):
                 positive = training_triples[batch]
@@ -156,31 +179,24 @@ class BootEA:
                 loss = self._triple_loss(torch, entities, relations, positive, negative, valid)
                 _gradient_step(torch, optimizer, loss, entities, relations)
 
-            order = torch.randperm(len(seed_indices), device=self.device, generator=generator)
-            for batch in order.split(self.batch_size):
-                # Swapping triples gives structure-level supervision. A direct distance
-                # term also aligns seeds with few or no incident relation triples.
-                source, target = torch.nn.functional.embedding(seed_indices[batch], entities).unbind(dim=1)
-                loss = (source - target).square().sum()
-                _gradient_step(torch, alignment_optimizer, loss, entities, relations)
-
             if epoch % self.bootstrap_every == 0:
                 with torch.no_grad():
                     pseudo_labels = self._refresh_labels(
                         torch, entities[left_rows], entities[right_rows], pseudo_labels, rejected,
                     )
-                pseudo_pairs = [(left_indices[l], left_size + right_indices[r]) for l, r in pseudo_labels.items()]
-                swaps = _swapped_triples(bootstrap_triples, pseudo_pairs)
-                if swaps:
-                    swapped = _triples_tensor(torch, swaps, self.device)
+                labels = torch.tensor(list(pseudo_labels.items()), dtype=torch.long, device=self.device)
+                pseudo_pairs = torch.stack((left_rows[labels[:, 0]], right_rows[labels[:, 1]]), dim=1) \
+                    if len(labels) else labels.reshape(0, 2)
+                swaps = keys.of(_swapped_triples(torch, bootstrap_triples, pseudo_pairs, entity_count))
+                if len(swaps):
+                    swapped = keys.rows(swaps)
                     order = torch.randperm(len(swapped), device=self.device, generator=generator)
                     for batch in order.split(self.batch_size):
                         cost = _triple_cost(torch, entities, relations, swapped[batch])
                         loss = torch.nn.functional.softplus(cost).sum()
                         _gradient_step(torch, alignment_optimizer, loss, entities, relations)
-                if swaps != previous_swaps:
-                    known = _triples_tensor(torch, base_triples | swaps, self.device)
-                    known_positives = _positive_keys(torch, known, entity_count, predicate_count)
+                if not torch.equal(swaps, previous_swaps):
+                    known_positives = keys.union(base_keys, swaps)
                     previous_swaps = swaps
             if validation.stop(epoch, encode) or epoch == self.epochs:
                 break
@@ -188,6 +204,7 @@ class BootEA:
                 with torch.no_grad():
                     neighbors = (self._hard_neighbors(torch, generator, entities[:left_size]),
                                  self._hard_neighbors(torch, generator, entities[left_size:]))
+            validation.checkpoint(epoch)
 
         return validation.vectors(encode)
 
@@ -211,11 +228,16 @@ class BootEA:
         else:
             pool = torch.randperm(len(vectors), device=self.device, generator=generator)[:pool_size]
             targets = vectors[pool]
-        count = min(pool_size - 1, ceil((1.0 - self.epsilon) * pool_size))
+        count = self._neighbor_count(len(vectors))
         result = torch.empty((len(vectors), count), dtype=torch.int32, device=self.device)
         for start, indices in _nearest_k(torch, vectors, targets, count, self.block_size, pool):
             result[start:start + len(indices)] = pool[indices]
         return result
+
+    def _neighbor_count(self, size: int) -> int:
+        """The number of hard negatives per entity of a graph with ``size`` entities."""
+        pool_size = min(size, self.neighbor_pool_size)
+        return min(pool_size - 1, ceil((1.0 - self.epsilon) * pool_size))
 
     def _triple_loss(self, torch, entities, relations, positive, negative, valid):
         # Gather endpoints once so autograd accumulates into each table once per batch.
@@ -255,11 +277,51 @@ class BootEA:
         return negative, keys != positives[locations]
 
     def _bootstrap(self, torch, left, right, rejected):
+        """New labels: a greedy maximum-weight matching of each row's ``k`` best columns above ``sim_th``.
+
+        ``left`` and ``right`` hold unit vectors of the candidates, and
+        ``rejected`` the ``(row, column)`` pairs that never become labels.
+        Heavier pairs are matched first; equal weights go to the lower row,
+        then the lower column.
+        """
         if len(left) == 0 or len(right) == 0:
             return ()
-        matches = nearest_neighbors(torch, left, right, _cosine_block, self.block_size,
-                                    largest=True, reciprocal=True, excluded=rejected)
-        return tuple((row, col) for row, col, score in matches if score > self.sim_th)
+        k = min(self.k, len(right))
+        blocked = torch.tensor(sorted(rejected), dtype=torch.long, device=left.device).reshape(-1, 2)
+        block = max(1, _LABEL_ENTRIES // len(right))
+        rows, columns, weights = [], [], []
+        for start in range(0, len(left), block):
+            similarity = _cosine_block(left[start:start + block], right)
+            inside = (blocked[:, 0] >= start) & (blocked[:, 0] < start + len(similarity))
+            similarity[blocked[inside, 0] - start, blocked[inside, 1]] = float("-inf")
+            values, indices = similarity.topk(k, dim=1)
+            keep = values > self.sim_th
+            rows.append((torch.nonzero(keep)[:, 0] + start).cpu())
+            columns.append(indices[keep].cpu())
+            weights.append(values[keep].cpu())
+        rows, columns, weights = (torch.cat(part).numpy() for part in (rows, columns, weights))
+        order = np.lexsort((columns, rows, -weights.astype(np.float64)))
+        used_rows, used_columns, labels = set(), set(), []
+        for row, column in zip(rows[order].tolist(), columns[order].tolist(), strict=True):
+            if row not in used_rows and column not in used_columns:
+                used_rows.add(row)
+                used_columns.add(column)
+                labels.append((row, column))
+        return tuple(labels)
+
+
+# Bounds each similarity block of the labeling, in matrix entries.
+_LABEL_ENTRIES = 1 << 24
+
+
+def _graph_triples(left_graph, right_graph) -> np.ndarray:
+    """The relation triples of both graphs in one index space: right entities and relations follow the left ones.
+
+    As in OpenEA, relations with the same name in the two graphs stay separate.
+    """
+    right = np.asarray(right_graph.relation_triples, dtype=np.int64).reshape(-1, 3)
+    offsets = np.array([left_graph.num_entities, len(left_graph.predicates), left_graph.num_entities])
+    return np.concatenate((np.asarray(left_graph.relation_triples, dtype=np.int64).reshape(-1, 3), right + offsets))
 
 
 def _validated_seeds(data: TrainingData) -> TrainingData:
@@ -277,29 +339,52 @@ def _validated_seeds(data: TrainingData) -> TrainingData:
     return replace(data, seeds=seeds, candidates=candidates)
 
 
-def _swapped_triples(triples, pairs):
-    counterparts = dict(pairs)
-    counterparts.update((right, left) for left, right in pairs)
-    swaps = set()
-    for head, predicate, tail in triples:
-        if head in counterparts:
-            swaps.add((counterparts[head], predicate, tail))
-        if tail in counterparts:
-            swaps.add((head, predicate, counterparts[tail]))
-    return swaps
+def _swapped_triples(torch, triples, pairs, entity_count):
+    """Triples with one endpoint replaced by its counterpart in ``pairs``, an ``(n, 2)`` tensor.
+
+    A triple with both endpoints in ``pairs`` gives one swap for each endpoint.
+    The rows may repeat.
+    """
+    counterparts = torch.full((entity_count,), -1, dtype=torch.long, device=triples.device)
+    counterparts[pairs[:, 0]] = pairs[:, 1]
+    counterparts[pairs[:, 1]] = pairs[:, 0]
+    heads, tails = counterparts[triples[:, 0]], counterparts[triples[:, 2]]
+    by_head = triples[heads >= 0].clone()
+    by_head[:, 0] = heads[heads >= 0]
+    by_tail = triples[tails >= 0].clone()
+    by_tail[:, 2] = tails[tails >= 0]
+    return torch.cat((by_head, by_tail))
 
 
-def _triples_tensor(torch, triples, device):
-    return torch.tensor(sorted(triples), dtype=torch.long, device=device).reshape(-1, 3)
+class _TripleKeys:
+    """Triple sets as sorted unique ``int64`` keys, which order like the ``(head, predicate, tail)`` rows."""
+
+    def __init__(self, torch, entity_count, predicate_count, device):
+        self.torch, self.device = torch, device
+        self.entity_count, self.predicate_count = entity_count, predicate_count
+        self.empty = torch.zeros(0, dtype=torch.long, device=device)
+
+    def of(self, triples):
+        """The sorted unique keys of an ``(n, 3)`` array or tensor of triples."""
+        triples = self.torch.as_tensor(triples, dtype=self.torch.long, device=self.device).reshape(-1, 3)
+        return self.unique(_triple_keys(triples, self.entity_count, self.predicate_count))
+
+    def unique(self, keys):
+        return self.torch.unique(keys, sorted=True)
+
+    def union(self, *keys):
+        return self.unique(self.torch.cat(keys))
+
+    def rows(self, keys):
+        """The triples of sorted keys, in the same order."""
+        pairs, tail = keys.div(self.entity_count, rounding_mode="floor"), keys.remainder(self.entity_count)
+        head, predicate = pairs.div(self.predicate_count, rounding_mode="floor"), pairs.remainder(self.predicate_count)
+        return self.torch.stack((head, predicate, tail), dim=1)
 
 
 def _triple_keys(triples, entity_count, predicate_count):
     head, predicate, tail = triples.T
     return (head * predicate_count + predicate) * entity_count + tail
-
-
-def _positive_keys(torch, triples, entity_count, predicate_count):
-    return torch.sort(_triple_keys(triples, entity_count, predicate_count)).values
 
 
 def _triple_cost(torch, entities, relations, triples):

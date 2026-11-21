@@ -1,0 +1,9 @@
+# PRASE with GCNAlign (Wang et al., EMNLP 2018).
+#
+# One PRASE round runs PARIS, trains GCNAlign on the PARIS matches, and runs PARIS again
+# with GCNAlign's proposed pairs and embedding similarity. [method] takes the settings of a
+# run file's [method] table (src/prase/config.py). GCNAlign runs with its default options.
+
+[method]
+name = "prase"
+model = "gcnalign"

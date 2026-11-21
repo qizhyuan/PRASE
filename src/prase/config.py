@@ -44,7 +44,11 @@ run file's directory, and unknown settings are an error.
 
 ``[output]``
     ``directory`` for the run records, and ``embeddings = true`` to save the
-    entity vectors there as well.
+    entity vectors there as well. A run with a directory saves checkpoints in
+    its ``checkpoint`` folder. ``checkpoints = false`` turns them off, and a
+    ``[output.checkpoints]`` table sets the fields of
+    :class:`~prase.CheckpointPolicy`: ``steps``, ``training``,
+    ``training_minutes``, ``keep``, and ``directory``.
 """
 
 from __future__ import annotations
@@ -59,6 +63,7 @@ from typing import Any
 from . import methods
 from .alignment import Alignment
 from .baselines import NameEmbeddingMatch, NameMatch
+from .checkpoints import CheckpointPolicy
 from .datasets import BENCHMARK_NAMES, Dataset, load_benchmark, load_dataset, read_links
 from .decisions import Decisions
 from .embedding import model_path_options
@@ -80,13 +85,17 @@ class RunConfig:
     seed: int = 0
     output: Path | None = None
     save_embeddings: bool = False
+    checkpoints: CheckpointPolicy | None = CheckpointPolicy()
 
-    def run(self) -> RunResult:
-        """Run the pipeline and score it when reference links are available."""
+    def run(self, *, resume: bool = False) -> RunResult:
+        """Run the pipeline and score it when reference links are available.
+
+        With ``resume``, continue the interrupted run in the output directory.
+        """
         return self.pipeline.run(
             self.dataset.left, self.dataset.right, decisions=self.decisions, seeds=self.seeds, seed=self.seed,
             reference=self.dataset.reference(self.reference) if self.reference else None,
-            output=self.output, save_embeddings=self.save_embeddings,
+            output=self.output, save_embeddings=self.save_embeddings, checkpoints=self.checkpoints, resume=resume,
         )
 
 
@@ -113,14 +122,31 @@ def load_config(path: str | Path) -> RunConfig:
     seeds = Alignment.read(_path(source["seeds"], base), dataset.left, dataset.right) if "seeds" in source else None
 
     output = _table(values, "output")
-    _known(output, {"directory", "embeddings"}, "[output]")
+    _known(output, {"directory", "embeddings", "checkpoints"}, "[output]")
     seed = values.get("seed", 0)
     if type(seed) is not int or seed < 0:
         raise ConfigError("seed must be a nonnegative integer")
     return RunConfig(
         pipeline, dataset, tuple(reference), decisions, seeds, seed,
-        _path(output["directory"], base) if "directory" in output else None, bool(output.get("embeddings", False)),
+        _path(output["directory"], base) if "directory" in output else None, _flag(output, "embeddings", "[output]"),
+        _checkpoint_policy(output.get("checkpoints", True), base),
     )
+
+
+def _flag(table: dict[str, Any], key: str, label: str) -> bool:
+    value = table.get(key, False)
+    if not isinstance(value, bool):
+        raise ConfigError(f"{key} in {label} must be true or false")
+    return value
+
+
+def _checkpoint_policy(value: Any, base: Path) -> CheckpointPolicy | None:
+    if isinstance(value, bool):
+        return CheckpointPolicy() if value else None
+    settings = _settings(value, CheckpointPolicy, "[output.checkpoints]")
+    if "directory" in settings:
+        settings["directory"] = _path(settings["directory"], base)
+    return CheckpointPolicy(**settings)
 
 
 def build_method(table: Mapping[str, Any], base: Path) -> Pipeline:

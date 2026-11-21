@@ -72,7 +72,8 @@ struct Pass {
                 const Index head = source.source_head[fact];
                 const Index head_match = match[head];
                 const double head_prob = prob[head];
-                if (head_match < 0 || head_prob < settings.theta) {
+                // A neighbor counts as evidence when its counterpart has a positive probability of at least theta.
+                if (head_match < 0 || !(head_prob > 0.0) || head_prob < settings.theta) {
                     continue;
                 }
                 const Index q = source.source_pred[fact];
@@ -101,9 +102,10 @@ struct Pass {
                         }
                         sub = sup = settings.theta;
                     }
+                    // PARIS Eq. 13: each inclusion carries the functionality of its superrelation.
                     const double factor =
-                        (1.0 - head_prob * sup * (target.functionality[q2] / settings.epsilon)) *
-                        (1.0 - head_prob * sub * (source.functionality[q] / settings.epsilon));
+                        (1.0 - head_prob * sub * (target.functionality[q2] / settings.epsilon)) *
+                        (1.0 - head_prob * sup * (source.functionality[q] / settings.epsilon));
                     if (!(1.0 - factor > settings.delta)) {
                         continue;
                     }
@@ -228,7 +230,7 @@ PassResult run_pass(const Pass& pass, const std::vector<Index>& fixed, int threa
             ++fixed_key;
         } else {
             const double scale = pass.settings.smoothing + norm[static_cast<std::size_t>(key / table.width)];
-            table.values.push_back(support[key] / scale);
+            table.values.push_back(scale > 0.0 ? support[key] / scale : 0.0);
         }
     }
     return result;
@@ -240,7 +242,8 @@ void one_to_one(State& state, Index left_entities, Index right_entities) {
     std::vector<double> best(static_cast<std::size_t>(right_entities), 0.0);
     for (Index l = 0; l < left_entities; ++l) {
         const Index r = state.left_match[l];
-        if (r < 0) {
+        // Only a positive probability claims a counterpart.
+        if (r < 0 || !(state.left_prob[l] > 0.0)) {
             continue;
         }
         if (winner[r] < 0 || state.left_prob[l] > best[r]) {
@@ -248,11 +251,11 @@ void one_to_one(State& state, Index left_entities, Index right_entities) {
             best[r] = state.left_prob[l];
         }
     }
+    // Rebuilt from the current left matches, so a right entity never keeps a left
+    // entity that has moved to another counterpart.
     for (Index r = 0; r < right_entities; ++r) {
-        if (winner[r] >= 0 && best[r] > state.right_prob[r]) {
-            state.right_match[r] = winner[r];
-            state.right_prob[r] = best[r];
-        }
+        state.right_match[r] = winner[r];
+        state.right_prob[r] = winner[r] >= 0 ? best[r] : 0.0;
     }
     for (Index l = 0; l < left_entities; ++l) {
         const Index r = state.left_match[l];

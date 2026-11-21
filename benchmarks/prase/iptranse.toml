@@ -1,0 +1,17 @@
+# PRASE with IPTransE (Zhu et al., IJCAI 2017).
+#
+# One PRASE round runs PARIS, trains IPTransE on the PARIS matches, and runs PARIS again
+# with IPTransE's proposed pairs and embedding similarity. [method] takes the settings of a
+# run file's [method] table (src/prase/config.py); `options` are IPTransE's settings.
+
+[method]
+name = "prase"
+model = "iptranse"
+
+# Per-dataset IPTransE options, merged over [method].options, as in OpenEA: on the
+# 100K datasets, IPTransE trains on batches of 20,000 triples instead of 5,000.
+[dataset_options]
+EN-FR-100K-V2 = { batch_size = 20000 }
+EN-DE-100K-V2 = { batch_size = 20000 }
+D-W-100K-V2 = { batch_size = 20000 }
+D-Y-100K-V2 = { batch_size = 20000 }

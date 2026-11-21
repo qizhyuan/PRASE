@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 
 from .alignment import Alignment
+from .checkpoints import file_identity
 from .datasets import read_word_vectors
 from .embedding.base import Embeddings
 from .errors import ConfigError
@@ -89,6 +90,10 @@ class NameMatch:
         context.report(matches=len(alignment))
         return replace(state, alignment=alignment)
 
+    def checkpoint_key(self) -> dict:
+        return {"threshold": self.threshold, "left_names": list(self.left_names),
+                "right_names": list(self.right_names), "lowercase": self.lowercase, "candidates": self.candidates}
+
     def _names(self, kg: KG, predicates: Sequence[str]) -> list[str]:
         names = entity_names(kg, predicates)
         return [name.lower() for name in names] if self.lowercase else names
@@ -122,6 +127,11 @@ class NameEmbeddingMatch:
         alignment = review.approved.concat(found.above(self.threshold))
         context.report(words=len(vectors), vocabulary=len(vocabulary), matches=len(alignment))
         return replace(state, alignment=alignment)
+
+    def checkpoint_key(self) -> dict:
+        """The settings and the digest of the word vector file."""
+        return {"word_vectors": file_identity(self.word_vectors), "threshold": self.threshold,
+                "left_names": list(self.left_names), "right_names": list(self.right_names)}
 
 
 class _Review:

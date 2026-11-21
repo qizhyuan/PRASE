@@ -1,9 +1,11 @@
 """Manual review guarantees, checked with random decisions against every method and neighbor search."""
 
 import importlib.util
+import itertools
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -82,11 +84,17 @@ class NeighborSearchTest(unittest.TestCase):
     def test_training_search_matches_brute_force(self):
         import torch
 
-        from prase.embedding.common import nearest_neighbors
+        from prase.embedding import common
 
         rng = np.random.default_rng(1)
         for trial in range(40):
             left_vectors, right_vectors, _, _, _ = self.random_case(rng)
+            # Repeated vectors give equal scores, which resolve to the lower index. On CUDA,
+            # the same product can round differently in blocks of another shape, so ties
+            # are checked where one block holds all scores.
+            ties = trial % 4 == 0
+            if ties:
+                left_vectors[1::2], right_vectors[1::2] = left_vectors[0], right_vectors[0]
             rows, columns = len(left_vectors), len(right_vectors)
             excluded = {(int(rng.integers(rows)), int(rng.integers(columns))) for _ in range(rng.integers(0, 30))}
             given = FORMATS[trial % 3](sorted(excluded))
@@ -97,17 +105,42 @@ class NeighborSearchTest(unittest.TestCase):
                                               {(j, i) for i, j in excluded}, largest))
                 for reciprocal in (False, True):
                     expected = [(i, j) for i, j in forward if not reciprocal or backward.get(j) == i]
-                    for device in devices():
-                        for block_size in (1, 2, 3, 7, 64):
-                            with self.subTest(trial=trial, largest=largest, reciprocal=reciprocal, device=device,
-                                              block_size=block_size):
-                                found = nearest_neighbors(
-                                    torch, torch.tensor(left_vectors, dtype=torch.float32, device=device),
-                                    torch.tensor(right_vectors, dtype=torch.float32, device=device),
-                                    lambda a, b: a @ b.T, block_size, largest=largest, reciprocal=reciprocal,
-                                    excluded=given,
-                                )
-                                self.assertEqual([(i, j) for i, j, _ in found], expected)
+                    for device, block_size, entries in itertools.product(
+                        devices(), (1, 2, 3, 7, 64), (1, 6, common._NEIGHBOR_ENTRIES),
+                    ):
+                        if ties and entries != common._NEIGHBOR_ENTRIES:
+                            continue
+                        with (self.subTest(trial=trial, largest=largest, reciprocal=reciprocal, device=device,
+                                           block_size=block_size, entries=entries),
+                              patch.object(common, "_NEIGHBOR_ENTRIES", entries)):
+                            found = common.nearest_neighbors(
+                                torch, torch.tensor(left_vectors, dtype=torch.float32, device=device),
+                                torch.tensor(right_vectors, dtype=torch.float32, device=device),
+                                lambda a, b: a @ b.T, block_size, largest=largest, reciprocal=reciprocal,
+                                excluded=given,
+                            )
+                            self.assertEqual([(i, j) for i, j, _ in found], expected)
+
+    @unittest.skipUnless(HAS_TORCH, "PyTorch is not installed")
+    def test_training_search_skips_nan_scores_and_ignores_outside_positions(self):
+        import torch
+
+        from prase.embedding.common import nearest_neighbors
+
+        scores = torch.tensor([[float("nan"), 0.5, 0.2], [0.1, float("nan"), float("nan")]])
+
+        def select(rows, columns):
+            return rows[:, columns.long()].clone()
+
+        for device, block_size in itertools.product(devices(), (1, 2)):
+            with self.subTest(device=device, block_size=block_size):
+                columns = torch.arange(3, dtype=torch.float32, device=device)
+                found = nearest_neighbors(torch, scores.to(device), columns, select, block_size, largest=True,
+                                          reciprocal=True, excluded=[(0, 7), (-1, 0), (5, 1)])
+                self.assertEqual([(i, j) for i, j, _ in found], [(0, 1), (1, 0)])
+                found = nearest_neighbors(torch, scores.to(device), columns, select, block_size, largest=False,
+                                          reciprocal=False, excluded=None)
+                self.assertEqual([(i, j) for i, j, _ in found], [(0, 2), (1, 0)])
 
 
 class ReviewInvariantTest(unittest.TestCase):

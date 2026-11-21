@@ -162,16 +162,35 @@ class Embeddings:
         return forward.subset(best[forward.right] == forward.left)
 
     def ranks(self, left: np.ndarray, right: np.ndarray) -> np.ndarray:
-        """Rank (from 1) of ``right[k]`` among all of ``right`` for each ``left[k]``."""
+        """Rank (from 1) of ``right[k]`` among the distinct entities of ``right`` for each ``left[k]``.
+
+        Candidates with an equal score rank in the order in which they first
+        appear in ``right``, as in retrieval, which picks the first of them.
+        """
+        right = np.asarray(right)
+        values, first, inverse = np.unique(right, return_index=True, return_inverse=True)
+        order = np.argsort(first, kind="stable")
+        pool = values[order]
+        position = np.empty(len(order), dtype=np.int64)
+        position[order] = np.arange(len(order))
+        targets = position[inverse.reshape(-1)]
         ranks = np.empty(len(left), dtype=np.int64)
         if self.device == "cpu":
-            for start, block in self._blocks(left, right):
-                gold = block[np.arange(len(block)), np.arange(start, start + len(block))]
-                ranks[start:start + len(block)] = (block > gold[:, None]).sum(axis=1) + 1
+            columns = np.arange(len(pool))
+            for start, block in self._blocks(left, pool):
+                gold_columns = targets[start:start + len(block)]
+                gold = block[np.arange(len(block)), gold_columns][:, None]
+                ahead = (block > gold) | ((block == gold) & (columns[None, :] < gold_columns[:, None]))
+                ranks[start:start + len(block)] = ahead.sum(axis=1) + 1
         else:
-            for start, block in self._cuda_blocks(left, right):
-                gold = block[:, start:start + len(block)].diagonal()
-                ranks[start:start + len(block)] = ((block > gold[:, None]).sum(dim=1) + 1).cpu().numpy()
+            import torch
+
+            columns = torch.arange(len(pool), device=self.device)
+            for start, block in self._cuda_blocks(left, pool):
+                gold_columns = torch.as_tensor(targets[start:start + len(block)], device=block.device)
+                gold = block.gather(1, gold_columns[:, None])
+                ahead = (block > gold) | ((block == gold) & (columns[None, :] < gold_columns[:, None]))
+                ranks[start:start + len(block)] = (ahead.sum(dim=1) + 1).cpu().numpy()
         return ranks
 
     def _blocks(self, left: np.ndarray, right: np.ndarray):

@@ -58,8 +58,9 @@ class KG:
 
     ``relation_triples`` is an ``(n, 3)`` array of ``(head, predicate, tail)``
     entity triples, and ``attribute_triples`` an ``(m, 3)`` array of
-    ``(entity, predicate, literal)``. Predicates of both kinds share one index
-    space. All arrays are read-only.
+    ``(entity, predicate, literal)``. A repeated triple is kept once, at its
+    first position. Predicates of both kinds share one index space. All
+    arrays are read-only.
     """
 
     def __init__(
@@ -263,5 +264,9 @@ def _triple_array(rows: object) -> np.ndarray:
         array = np.zeros((0, 3), dtype=np.int64)
     if array.ndim != 2 or array.shape[1] != 3:
         raise DataError("triples must be an (n, 3) table of indices")
+    # PARIS counts each fact once, so a repeated triple is kept at its first position only.
+    _, first = np.unique(array, axis=0, return_index=True)
+    if len(first) < len(array):
+        array = array[np.sort(first)]
     array.setflags(write=False)
     return array

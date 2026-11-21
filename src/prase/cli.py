@@ -10,11 +10,12 @@ from dataclasses import replace
 from pathlib import Path
 
 from .alignment import Alignment
+from .checkpoints import CheckpointPolicy
 from .config import load_config
 from .datasets import BENCHMARK_NAMES, download_benchmark, download_word_vectors, load_dataset, read_links
 from .decisions import Decisions
 from .embedding import available_models
-from .errors import DataError, PraseError
+from .errors import ConfigError, DataError, PraseError
 from .metrics import threshold_scores
 
 
@@ -33,6 +34,13 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--output", type=Path, help="write results here, replacing [output] directory")
     run.add_argument("--decisions", type=Path, help="approve/reject decisions from a review")
     run.add_argument("--seed", type=int, help="replace the run file's seed")
+    run.add_argument("--resume", action="store_true",
+                     help="continue the interrupted run in the output directory from its checkpoints")
+    run.add_argument("--checkpoint-minutes", type=float, metavar="MINUTES",
+                     help="minutes between training checkpoints (default 10; 0 saves after every epoch)")
+    run.add_argument("--keep-checkpoints", action="store_true",
+                     help="keep the checkpoint folder after the run finishes")
+    run.add_argument("--no-checkpoints", action="store_true", help="save no checkpoints")
     run.add_argument("--quiet", action="store_true", help="only print the final scores")
 
     evaluate = commands.add_parser("evaluate", help="score an alignment TSV against reference links")
@@ -79,7 +87,18 @@ def _run(args: argparse.Namespace) -> int:
         config = replace(config, decisions=config.decisions.merged(decisions) if config.decisions else decisions)
     if args.seed is not None:
         config = replace(config, seed=args.seed)
-    result = config.run()
+    if args.no_checkpoints:
+        if args.resume or args.keep_checkpoints or args.checkpoint_minutes is not None:
+            raise ConfigError("--no-checkpoints cannot be combined with other checkpoint options")
+        config = replace(config, checkpoints=None)
+    elif args.keep_checkpoints or args.checkpoint_minutes is not None:
+        policy = config.checkpoints or CheckpointPolicy()
+        if args.keep_checkpoints:
+            policy = replace(policy, keep=True)
+        if args.checkpoint_minutes is not None:
+            policy = replace(policy, training=True, training_minutes=args.checkpoint_minutes)
+        config = replace(config, checkpoints=policy)
+    result = config.run(resume=args.resume)
     summary = {"pipeline": config.pipeline.name, "matches": len(result.alignment), "seconds": round(result.seconds, 2)}
     if result.scores is not None:
         summary.update({key: round(value, 4) if isinstance(value, float) else value

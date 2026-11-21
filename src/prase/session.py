@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import numpy as np
+
 from .alignment import Alignment, PredicateMatch
 from .decisions import Decisions
 from .embedding.base import Embeddings
@@ -28,6 +30,7 @@ class Session:
         self._rejected: set[tuple[str, str]] = set()
         self._fixed_predicates: set[tuple[int, int]] = set()
         self._embeddings: Embeddings | None = None
+        self._run_embeddings: Embeddings | None = None
         self.result: ParisResult | None = None
 
     def seed(self, left_id: str, right_id: str, probability: float = 1.0) -> None:
@@ -91,11 +94,13 @@ class Session:
         rows = [
             (self.left.entity_index[a], self.right.entity_index[b], p) for (a, b), p in sorted(self._seeds.items())
         ]
+        embeddings = self._embeddings
         self.result = self.paris.run(
-            seeds=Alignment.from_pairs(rows), embeddings=self._embeddings,
+            seeds=Alignment.from_pairs(rows), embeddings=embeddings,
             constraints=self.decisions.resolve(self.left, self.right),
             fixed_predicates=self._fixed_predicates,
         )
+        self._run_embeddings = embeddings
         return self.result
 
     def matches(self, minimum: float = 0.0) -> list[tuple[str, str, float]]:
@@ -115,19 +120,37 @@ class Session:
             [entity for index, entity in enumerate(self.right.entities) if index not in right],
         )
 
-    def candidates(self, left_id: str, limit: int = 10) -> list[tuple[str, Candidate]]:
-        """Score right-side alternatives for a left entity using the last run.
+    def match(self, left_id: str) -> tuple[str, float] | None:
+        """The right entity matched to a left entity by the last run and its probability, or None."""
+        result = self._finished()
+        left = self._left_index(left_id)
+        found = result.alignment.left == left
+        if not found.any():
+            return None
+        position = int(np.flatnonzero(found)[0])
+        return self.right.entities[int(result.alignment.right[position])], float(result.alignment.score[position])
 
-        Rejected pairs and right entities approved for another left entity are left out.
+    def candidates(self, left_id: str, limit: int = 10) -> list[tuple[str, Candidate]]:
+        """Score right-side alternatives for a left entity against the final state of the last run.
+
+        The scores repeat the evidence computation with the final relation and
+        entity matches, so they can differ from the probability that the run
+        recorded for the accepted match, which :meth:`match` returns. They use
+        the embeddings of the last run, not ones set since. Rejected
+        pairs and right entities approved for another left entity are left out.
         """
         result = self._finished()
+        left = self._left_index(left_id)
+        found = self.paris.candidates(
+            result, left, embeddings=self._run_embeddings, limit=limit,
+        )
+        return [(self.right.entities[candidate.right], candidate) for candidate in found]
+
+    def _left_index(self, left_id: str) -> int:
         left = self.left.entity_index.get(left_id)
         if left is None:
             raise DataError(f"unknown left entity {left_id!r}")
-        found = self.paris.candidates(
-            result, left, embeddings=self._embeddings, limit=limit,
-        )
-        return [(self.right.entities[candidate.right], candidate) for candidate in found]
+        return left
 
     def _finished(self) -> ParisResult:
         if self.result is None:

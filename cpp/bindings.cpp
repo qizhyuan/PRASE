@@ -105,6 +105,10 @@ public:
             if (left_array.ndim() != 2 || right_array.ndim() != 2 || left_array.shape(1) != right_array.shape(1)) {
                 throw std::invalid_argument("embedding matrices must be 2-D with equal widths");
             }
+            // The engine reads one row per entity, by entity index.
+            if (left_array.shape(0) != left_.index.num_entities || right_array.shape(0) != right_.index.num_entities) {
+                throw std::invalid_argument("embedding matrices need one row per entity of each graph");
+            }
             vectors = {data<float>(left_array, "left vectors"), data<float>(right_array, "right vectors"),
                        static_cast<Index>(left_array.shape(1))};
         }
@@ -129,7 +133,7 @@ private:
 
 PYBIND11_MODULE(_paris, module) {
     module.doc() = "Native PARIS iteration for prase.paris";
-    module.attr("API_VERSION") = 3;
+    module.attr("API_VERSION") = 6;
     py::class_<PyEngine>(module, "Engine")
         .def(py::init<const py::dict&, const py::dict&, double, double, double, double, double, int>())
         .def("iterate", &PyEngine::iterate);

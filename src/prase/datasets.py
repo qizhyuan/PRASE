@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import tempfile
 import tomllib
 import urllib.request
@@ -274,6 +275,8 @@ def read_pairs_with_scores(path: PathLike) -> list[tuple[str, str, float]]:
                 score = float(fields[2]) if len(fields) == 3 else 1.0
             except ValueError as error:
                 raise DataError(f"{path}:{number}: invalid score {fields[2]!r}") from error
+            if not math.isfinite(score):
+                raise DataError(f"{path}:{number}: the score must be a finite number, not {fields[2]!r}")
             rows.append((fields[0], fields[1], score))
     return rows
 
