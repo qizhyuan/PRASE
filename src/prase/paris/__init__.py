@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
 from operator import index
@@ -12,8 +13,9 @@ from ..alignment import Alignment, PredicateMatch
 from ..decisions import Constraints
 from ..errors import ConfigError, DataError
 from ..kg import KG
+from ..progress import Progress
 from . import native
-from .python import PythonEngine, _candidates
+from .python import PythonEngine, _candidates, _one_to_one
 from .state import GraphIndex, ParisState, RelationTable
 
 __all__ = ["Candidate", "LiteralMatcher", "Paris", "ParisConfig", "ParisResult", "exact_literals"]
@@ -27,11 +29,13 @@ class ParisConfig:
     """Settings for reasoning, embedding feedback, and engine selection.
 
     ``theta`` is the minimum probability of a matched neighbor to count as
-    evidence, and the relation prior during warm-up. ``delta`` is the minimum
-    evidence a fact must contribute. Relation and functionality scores are
-    divided by ``epsilon``, and ``smoothing`` is added to the denominator of
-    every relation estimate. The first ``warmup`` iterations use the prior for
-    unknown relations and ignore embeddings. A candidate's score is
+    evidence, which always needs a positive probability, and the relation
+    prior during warm-up. ``delta`` is the minimum evidence a fact must
+    contribute. Relation and functionality scores are divided by ``epsilon``,
+    which is at least 1 so that every evidence factor stays a probability,
+    and ``smoothing`` is added to the denominator of every relation estimate.
+    The first ``warmup`` iterations use the prior for unknown relations and
+    ignore embeddings. A candidate's score is
     ``(1 - embedding_weight) * structural + embedding_weight * cosine``.
     """
 
@@ -50,11 +54,17 @@ class ParisConfig:
             value = getattr(self, name)
             if type(value) is not int or value < 0:
                 raise ConfigError(f"paris.{name} must be a nonnegative integer")
+        for name in ("theta", "delta", "epsilon", "smoothing", "embedding_weight"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ConfigError(f"paris.{name} must be a finite number")
         for name in ("theta", "delta", "embedding_weight"):
             if not 0.0 <= getattr(self, name) <= 1.0:
                 raise ConfigError(f"paris.{name} must be between 0 and 1")
-        if self.epsilon <= 0 or self.smoothing < 0:
-            raise ConfigError("paris.epsilon must be positive and paris.smoothing nonnegative")
+        if self.epsilon < 1:
+            raise ConfigError("paris.epsilon must be at least 1")
+        if self.smoothing < 0:
+            raise ConfigError("paris.smoothing must be nonnegative")
         if self.engine not in ENGINES:
             raise ConfigError(f"paris.engine must be one of {', '.join(ENGINES)}")
 
@@ -98,7 +108,15 @@ class Paris:
         self.left, self.right = left, right
         self.config = config or ParisConfig()
         self.left_index, self.right_index = GraphIndex(left), GraphIndex(right)
-        self.literal_pairs = literal_matcher(left, right).one_to_one()
+        literals = literal_matcher(left, right)
+        if not isinstance(literals, Alignment):
+            raise DataError("a literal matcher must return an Alignment of literal index pairs")
+        _check_pairs("literal pairs", literals.left, literals.right, len(left.literals), len(right.literals),
+                     kind="literal")
+        if len(literals) and not ((literals.score >= 0) & (literals.score <= 1)).all():
+            raise DataError("literal pair scores must be probabilities between 0 and 1")
+        # Only a positive probability makes literals counterparts.
+        self.literal_pairs = literals.subset(literals.score > 0).one_to_one()
         self.engine = _engine(self.left_index, self.right_index, self.config)
 
     def initial_state(
@@ -142,12 +160,20 @@ class Paris:
 
         constraints = constraints or Constraints()
         approved = constraints.approved
+        _check_pairs("approved pairs", approved[:, 0], approved[:, 1], left.num_entities, right.num_entities)
+        if constraints.rejected:
+            rejected = np.array(sorted(constraints.rejected), dtype=np.int64).reshape(-1, 2)
+            _check_pairs("rejected pairs", rejected[:, 0], rejected[:, 1], left.num_entities, right.num_entities)
+        if seeds is not None and len(seeds):
+            _check_pairs("seeds", seeds.left, seeds.right, left.num_entities, right.num_entities)
         state.fixed_left[approved[:, 0]] = True
         state.fixed_right[approved[:, 1]] = True
         state.rejected = np.unique(np.array(
             [i * right.num_entities + j for i, j in constraints.rejected], dtype=np.int64,
         ))
         if seeds is not None and len(seeds):
+            if not np.isfinite(seeds.score).all():
+                raise DataError("seed scores must be finite")
             keep = ~state.fixed_left[seeds.left] & ~state.fixed_right[seeds.right]
             if len(state.rejected):
                 keep &= ~np.isin(seeds.left * right.num_entities + seeds.right, state.rejected)
@@ -184,16 +210,33 @@ class Paris:
         ``on_iteration`` receives the iteration number, the current alignment,
         and iteration statistics.
         """
+        self._check_embeddings(embeddings)
         state = self.initial_state(seeds, constraints, fixed_predicates=fixed_predicates)
         history = []
+        progress = Progress("PARIS", self.config.iterations, unit="iteration")
         for iteration in range(self.config.iterations):
             stats = self.engine.iterate(state, iteration < self.config.warmup, embeddings)
             history.append(stats)
+            progress.update(iteration + 1, f"; {stats.get('matched', 0)} matches")
             if on_iteration is not None:
                 on_iteration(iteration + 1, self.alignment(state), stats)
+        if not self.config.iterations:
+            # Starting matches obey the rules of an iteration's result: one to one, positive probability.
+            _one_to_one(state, self.left_index.num_entities, self.right_index.num_entities)
         return ParisResult(
             self.alignment(state), self.predicate_matches(state), state, tuple(history), self.engine.name,
         )
+
+    def _check_embeddings(self, embeddings: object | None) -> None:
+        """Require one embedding row for every entity of each graph."""
+        if embeddings is None:
+            return
+        rows = (np.shape(embeddings.left)[0], np.shape(embeddings.right)[0])
+        if rows != (self.left.num_entities, self.right.num_entities):
+            raise DataError(
+                f"embeddings have {rows[0]} and {rows[1]} rows, but the graphs have "
+                f"{self.left.num_entities} and {self.right.num_entities} entities",
+            )
 
     def alignment(self, state: ParisState) -> Alignment:
         count = self.left_index.num_entities
@@ -222,11 +265,18 @@ class Paris:
         which is what a reviewer needs to compare alternatives. Rejected pairs
         and right entities approved for another left entity are left out.
         """
+        self._check_embeddings(embeddings)
+        if isinstance(entity, bool) or not isinstance(entity, (int, np.integer)) \
+                or not 0 <= entity < self.left.num_entities:
+            raise DataError(f"entity must be a left entity index below {self.left.num_entities}")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ConfigError("limit must be a positive integer")
+        entity = int(entity)
         source, target, state = self.left_index, self.right_index, result.state
         start, stop = source.source_ptr[entity], source.source_ptr[entity + 1]
         head = source.source_head[start:stop]
         match, prob = state.left_match[head], state.left_prob[head]
-        keep = (match >= 0) & (prob >= self.config.theta)
+        keep = (match >= 0) & (prob > 0.0) & (prob >= self.config.theta)
         found = _candidates(
             source, target, source.source_tail[start:stop][keep], source.source_pred[start:stop][keep],
             match[keep], prob[keep], state.left_relations, state.right_relations, self.config,
@@ -257,6 +307,13 @@ class Paris:
                       None if similarity is None else float(similarity[k]))
             for k in ranked
         ]
+
+
+def _check_pairs(what: str, left: np.ndarray, right: np.ndarray, left_count: int, right_count: int,
+                 *, kind: str = "entity") -> None:
+    """Require indices of the left and the right graph's entities, or of their literals."""
+    if len(left) and (left.min() < 0 or left.max() >= left_count or right.min() < 0 or right.max() >= right_count):
+        raise DataError(f"{what} need {kind} indices below {left_count} on the left and {right_count} on the right")
 
 
 def _first_per_group(keys: np.ndarray, order: np.ndarray) -> np.ndarray:

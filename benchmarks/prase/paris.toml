@@ -1,0 +1,8 @@
+# PARIS (Suchanek et al., VLDB 2011) on its own.
+#
+# PARIS aligns entities, relations, and attributes by probabilistic reasoning over the
+# facts of both graphs, starting from pairs of equal literals. It needs no training pairs.
+# [method] takes the settings of a run file's [method] table (src/prase/config.py).
+
+[method]
+name = "paris"

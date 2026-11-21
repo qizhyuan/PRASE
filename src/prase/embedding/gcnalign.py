@@ -5,9 +5,12 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from math import sqrt
 
+from ..alignment import Alignment
 from ..errors import ConfigError, DataError
 from .base import Embeddings, TrainingData
-from .common import SeedValidation, check_device, finite_number, fraction, positive_int, to_embeddings, training_runtime
+from .common import (
+    SeedValidation, check_device, finite_number, fraction, is_tensor, positive_int, to_embeddings, training_runtime,
+)
 
 
 class GCNAlign:
@@ -16,6 +19,9 @@ class GCNAlign:
     Counterparts are ranked by the Manhattan distance of their vectors, as in
     OpenEA. The first layer learns featureless entity representations and the
     second propagates those representations without another learned transform.
+    Training runs for up to ``epochs`` epochs and stops when validation stops
+    improving. With fewer than four seed pairs, too few to validate, it runs
+    for ``unvalidated_epochs``. Proposals are mutual nearest neighbors.
     """
 
     name = "gcnalign"
@@ -26,7 +32,8 @@ class GCNAlign:
         features: str = "structure",
         device: str = "cpu",
         dim: int = 100,
-        epochs: int = 300,
+        epochs: int = 2000,
+        unvalidated_epochs: int = 300,
         learning_rate: float = 8.0,
         margin: float = 3.0,
         negative_samples: int = 5,
@@ -39,6 +46,7 @@ class GCNAlign:
         self.device = check_device(device)
         self.dim = positive_int("dim", dim)
         self.epochs = positive_int("epochs", epochs)
+        self.unvalidated_epochs = positive_int("unvalidated_epochs", unvalidated_epochs)
         self.learning_rate = finite_number("learning_rate", learning_rate)
         self.margin = finite_number("margin", margin)
         if self.learning_rate <= 0 or self.margin <= 0:
@@ -47,11 +55,16 @@ class GCNAlign:
         self.attribute_dim = positive_int("attribute_dim", attribute_dim)
         self.attribute_weight = fraction("attribute_weight", attribute_weight)
 
+    def propose(self, embeddings: Embeddings, data: TrainingData) -> Alignment:
+        """Propose mutual nearest neighbors among the candidates."""
+        return embeddings.reciprocal_nearest(*data.candidates, excluded=data.rejected)
+
     def fit(self, data: TrainingData, *, seed: int) -> Embeddings:
         if not len(data.seeds):
             raise DataError("GCNAlign requires at least one seed pair")
         torch, generator = training_runtime(self.device, seed)
-        validation = SeedValidation(torch, data, seed, self.device, self.epochs, start=50, metric="l1")
+        validation = SeedValidation(torch, data, seed, self.device, self.epochs, start=50, metric="l1", model=self,
+                                    unvalidated_epochs=self.unvalidated_epochs)
         left, right = self._train(torch, generator, validation)
         return to_embeddings(left, right, "l1", info=validation.summary())
 
@@ -98,7 +111,21 @@ class GCNAlign:
         anchors = torch.tensor(data.seeds, dtype=torch.long, device=self.device).T
         if max(node_counts) > 1:
             optimizer = torch.optim.SGD(parameters, lr=self.learning_rate)
-            for epoch in range(1, self.epochs + 1):
+
+            def state_fits(saved):
+                parts = saved["corruptions"]
+                return isinstance(parts, list) and len(parts) == len(node_counts) and all(
+                    (part is None) == (size == 1)
+                    and (part is None or is_tensor(torch, part, torch.long, 2, self.negative_samples, limits=size,
+                                                   rows=len(side)))
+                    for part, size, side in zip(parts, node_counts, anchors, strict=True)
+                )
+
+            first = validation.resume(generator, parameters, (optimizer,), best=encode, check=state_fits,
+                                      state=lambda: {"corruptions": list(corruptions)})
+            if first > 1:
+                corruptions = tuple(validation.saved_state()["corruptions"])
+            for epoch in range(first, self.epochs + 1):
                 if (epoch - 1) % 10 == 0:
                     corruptions = tuple(
                         _corrupt(torch, seed_side, size, self.negative_samples, generator)
@@ -110,7 +137,11 @@ class GCNAlign:
                 optimizer.step()
                 if validation.stop(epoch, encode):
                     break
+                validation.checkpoint(epoch)
         return validation.vectors(encode)
+
+
+_MIN_WEIGHT = 0.3
 
 
 def _connectivity(graph):
@@ -123,19 +154,24 @@ def _connectivity(graph):
         heads[predicate].add(head)
         tails[predicate].add(tail)
 
-    functionality = {predicate: len(heads[predicate]) / count for predicate, count in counts.items()}
-    inverse = {predicate: len(tails[predicate]) / count for predicate, count in counts.items()}
+    # As in GCN-Align and OpenEA, a relation weighs at least 0.3, a head aggregates its
+    # tails by the relation's inverse functionality, and a tail its heads by the functionality.
+    functionality = {predicate: max(len(heads[predicate]) / count, _MIN_WEIGHT) for predicate, count in counts.items()}
+    inverse = {predicate: max(len(tails[predicate]) / count, _MIN_WEIGHT) for predicate, count in counts.items()}
     weights = defaultdict(float)
     for head, predicate, tail in triples:
+        if head == tail:
+            continue
         # Row j aggregates contributions made by source i to destination j.
-        weights[tail, head] += inverse[predicate]
-        weights[head, tail] += functionality[predicate]
+        weights[head, tail] += inverse[predicate]
+        weights[tail, head] += functionality[predicate]
     for index in range(graph.num_entities):
         weights[index, index] += 1.0
 
+    # Each entity's degree sums the weights of the contributions it makes, as in OpenEA.
     degree = [0.0] * graph.num_entities
-    for (destination, _), weight in weights.items():
-        degree[destination] += weight
+    for (_, source), weight in weights.items():
+        degree[source] += weight
     return {
         (destination, source): weight / sqrt(degree[destination] * degree[source])
         for (destination, source), weight in weights.items()

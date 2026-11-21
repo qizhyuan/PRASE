@@ -1,0 +1,191 @@
+# The experiments of "Unsupervised Knowledge Graph Alignment by Probabilistic Reasoning
+# and Semantic Embedding" (Qi et al., IJCAI 2021), run by reproduce.py.
+#
+# Each [experiments.<name>] table is one recipe, and its name is the run folder:
+#   description      what the recipe measures
+#   config           a stable method config, prase/<model>.toml or supervised/<model>.toml
+#   method           settings merged over the config's [method], or the whole [method] table
+#                    of a recipe without a config
+#   dataset_options  per-dataset settings, merged over the config's: model options for an
+#                    embedding method, method settings otherwise
+#   datasets         the datasets to run, by default the six datasets listed below
+#   rounds           per dataset, the additional PRASE round counts to run
+#   evaluation       how the recipe is scored; without it, the final alignment is scored
+#                    against the reference pairs:
+#                      "fold-ranking"          train on each benchmark fold's training links
+#                                              and rank its test links
+#                      "paris-seeded-ranking"  train on the PARIS matches and rank the
+#                                              entities that PARIS leaves unaligned
+# "@word_vectors" stands for the FastText file passed with --word-vectors.
+
+datasets = ["EN-FR-100K-V2", "EN-DE-100K-V2", "D-W-100K-V2", "D-Y-100K-V2", "D-W-15K-V2", "MED-BBK-9K"]
+
+# PARIS --------------------------------------------------------------------------------
+
+[experiments.paris]
+description = "PARIS alone"
+config = "prase/paris.toml"
+
+# Name-Matching Baselines --------------------------------------------------------------
+# Each entity is matched to the counterpart with the most similar name, when the
+# similarity reaches the threshold. Entities are named by their name attributes, or
+# otherwise by the local name of their identifier.
+
+[experiments.str-match]
+description = "STR-Match: normalized edit similarity of entity names, threshold 0.5"
+[experiments.str-match.method]
+name = "str-match"
+threshold = 0.5
+# Wikidata identifiers are opaque Q-numbers, so Wikidata entities are named by their
+# title (P1476), Commons category (P373), name in native language (P1559), or official name (P1448).
+[experiments.str-match.dataset_options.D-W-15K-V2]
+right_names = ["http://www.wikidata.org/entity/P1476", "http://www.wikidata.org/entity/P373", "http://www.wikidata.org/entity/P1559", "http://www.wikidata.org/entity/P1448"]
+[experiments.str-match.dataset_options.D-W-100K-V2]
+right_names = ["http://www.wikidata.org/entity/P1476", "http://www.wikidata.org/entity/P373", "http://www.wikidata.org/entity/P1559", "http://www.wikidata.org/entity/P1448"]
+
+[experiments.emb-match]
+description = "EMB-Match: cosine similarity of averaged entity name vectors, threshold 0.5"
+[experiments.emb-match.method]
+name = "emb-match"
+threshold = 0.5
+word_vectors = "@word_vectors"
+# Wikidata entities are named as in STR-Match.
+[experiments.emb-match.dataset_options.D-W-15K-V2]
+right_names = ["http://www.wikidata.org/entity/P1476", "http://www.wikidata.org/entity/P373", "http://www.wikidata.org/entity/P1559", "http://www.wikidata.org/entity/P1448"]
+[experiments.emb-match.dataset_options.D-W-100K-V2]
+right_names = ["http://www.wikidata.org/entity/P1476", "http://www.wikidata.org/entity/P373", "http://www.wikidata.org/entity/P1559", "http://www.wikidata.org/entity/P1448"]
+# The FastText vectors are English, so MED-BBK-9K entities are named by their English
+# name (英文名, 英文名称) before their Chinese name (中文名称).
+[experiments.emb-match.dataset_options.MED-BBK-9K]
+left_names = ["英文名"]
+right_names = ["英文名称", "中文名称"]
+
+# PRASE --------------------------------------------------------------------------------
+# One PRASE round, with both feedback channels from the embedding model to PARIS:
+# proposed pairs and embedding similarity. PRASE with BootEA and with MultiKE also runs
+# 2 to 4 rounds on D-W-15K-V2 and MED-BBK-9K.
+
+[experiments.prase-bootea]
+description = "PRASE with BootEA, both feedback channels"
+config = "prase/bootea.toml"
+rounds = { D-W-15K-V2 = [2, 3, 4], MED-BBK-9K = [2, 3, 4] }
+
+[experiments.prase-multike]
+description = "PRASE with MultiKE, both feedback channels"
+config = "prase/multike.toml"
+rounds = { D-W-15K-V2 = [2, 3, 4], MED-BBK-9K = [2, 3, 4] }
+
+[experiments.prase-mtranse]
+description = "PRASE with MTransE"
+config = "prase/mtranse.toml"
+
+[experiments.prase-iptranse]
+description = "PRASE with IPTransE"
+config = "prase/iptranse.toml"
+
+[experiments.prase-gcnalign]
+description = "PRASE with GCNAlign"
+config = "prase/gcnalign.toml"
+
+[experiments.prase-imuse]
+description = "PRASE with IMUSE"
+config = "prase/imuse.toml"
+
+# Feedback Ablations -------------------------------------------------------------------
+# The "-m" recipes pass only the proposed pairs to the second PARIS pass
+# (share_embeddings = false); the "-e" recipes pass only the embedding similarity
+# (propose = false).
+
+[experiments.prase-bootea-m]
+description = "PRASE with BootEA, proposed pairs only"
+config = "prase/bootea.toml"
+method = { share_embeddings = false }
+
+[experiments.prase-bootea-e]
+description = "PRASE with BootEA, embedding similarity only"
+config = "prase/bootea.toml"
+method = { propose = false }
+
+[experiments.prase-multike-m]
+description = "PRASE with MultiKE, proposed pairs only"
+config = "prase/multike.toml"
+method = { share_embeddings = false }
+
+[experiments.prase-multike-e]
+description = "PRASE with MultiKE, embedding similarity only"
+config = "prase/multike.toml"
+method = { propose = false }
+
+[experiments.prase-mtranse-e]
+description = "PRASE with MTransE embedding similarity only, on MED-BBK-9K"
+config = "prase/mtranse.toml"
+method = { propose = false }
+datasets = ["MED-BBK-9K"]
+
+# PARIS-Seeded Retrieval ---------------------------------------------------------------
+# Each embedding model trains on the PARIS matches, as in the first PRASE round, and
+# ranks counterparts for the entities that PARIS leaves unaligned. Scored by Hits@1.
+
+[experiments.se-mtranse]
+description = "MTransE Hits@1 on entities left unaligned by PARIS"
+config = "prase/mtranse.toml"
+evaluation = "paris-seeded-ranking"
+
+[experiments.se-iptranse]
+description = "IPTransE Hits@1 on entities left unaligned by PARIS"
+config = "prase/iptranse.toml"
+evaluation = "paris-seeded-ranking"
+
+[experiments.se-gcnalign]
+description = "GCNAlign Hits@1 on entities left unaligned by PARIS"
+config = "prase/gcnalign.toml"
+evaluation = "paris-seeded-ranking"
+
+[experiments.se-imuse]
+description = "IMUSE Hits@1 on entities left unaligned by PARIS"
+config = "prase/imuse.toml"
+evaluation = "paris-seeded-ranking"
+
+[experiments.se-bootea]
+description = "BootEA Hits@1 on entities left unaligned by PARIS"
+config = "prase/bootea.toml"
+evaluation = "paris-seeded-ranking"
+
+[experiments.se-multike]
+description = "MultiKE Hits@1 on entities left unaligned by PARIS"
+config = "prase/multike.toml"
+evaluation = "paris-seeded-ranking"
+
+# Supervised Embedding Models ----------------------------------------------------------
+# Each model trains on the training links of every benchmark fold and ranks the fold's
+# test links, without PARIS. Scores are averaged over the folds.
+
+[experiments.supervised-mtranse]
+description = "MTransE trained on the benchmark folds"
+config = "supervised/mtranse.toml"
+evaluation = "fold-ranking"
+
+[experiments.supervised-iptranse]
+description = "IPTransE trained on the benchmark folds"
+config = "supervised/iptranse.toml"
+evaluation = "fold-ranking"
+
+[experiments.supervised-gcnalign]
+description = "GCNAlign trained on the benchmark folds"
+config = "supervised/gcnalign.toml"
+evaluation = "fold-ranking"
+
+[experiments.supervised-imuse]
+description = "IMUSE trained on the benchmark folds"
+config = "supervised/imuse.toml"
+evaluation = "fold-ranking"
+
+[experiments.supervised-bootea]
+description = "BootEA trained on the benchmark folds"
+config = "supervised/bootea.toml"
+evaluation = "fold-ranking"
+
+[experiments.supervised-multike]
+description = "MultiKE trained on the benchmark folds"
+config = "supervised/multike.toml"
+evaluation = "fold-ranking"

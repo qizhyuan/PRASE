@@ -46,7 +46,7 @@ class PythonEngine:
             entity, match, prob = updates
             state.left_match[entity] = match
             state.left_prob[entity] = prob
-        _one_to_one(state, self.left.num_entities)
+        _one_to_one(state, self.left.num_entities, self.right.num_entities)
         state.right_relations, _ = _pass(
             self.right, self.left, state.right_match, state.right_prob,
             state.right_relations, state.left_relations, self.config, warm,
@@ -87,8 +87,8 @@ def _pass(
     ``(entities, counterparts, probabilities)``.
     """
     theta = config.theta
-    relation_keys, relation_weights = [], []
-    norm = np.zeros(source.num_predicates)
+    # Relation statistics are summed once, in fact order, as the native engine sums them.
+    relation_keys, relation_weights, norm_keys, norm_weights = [], [], [], []
     updates = []
     scored = []
     for first, last in _chunks(source):
@@ -96,14 +96,16 @@ def _pass(
         q = source.source_pred[first:last]
         head = source.source_head[first:last]
         head_match, head_prob = match[head], prob[head]
-        keep = (head_match >= 0) & (head_prob >= theta)
+        # A neighbor counts as evidence when its counterpart has a positive probability of at least theta.
+        keep = (head_match >= 0) & (head_prob > 0.0) & (head_prob >= theta)
         x, q, head_match, head_prob = x[keep], q[keep], head_match[keep], head_prob[keep]
         x_match, x_prob = match[x], prob[x]
 
         # Relation statistics: weighted support for q ⊆ q' over matched facts.
         has = x_match >= 0
         weight = head_prob * x_prob
-        norm += np.bincount(q[has], weights=weight[has], minlength=source.num_predicates)
+        norm_keys.append(q[has])
+        norm_weights.append(weight[has])
         sel = np.flatnonzero(has & (x_prob > 0.0))
         keys = head_match[sel] * target.num_entities + x_match[sel]
         row, position = _expand(
@@ -124,11 +126,14 @@ def _pass(
 
     keys = np.concatenate(relation_keys) if relation_keys else np.zeros(0, dtype=np.int64)
     weights = np.concatenate(relation_weights) if relation_weights else np.zeros(0)
+    norm = np.bincount(np.concatenate(norm_keys) if norm_keys else np.zeros(0, dtype=np.int64),
+                       weights=np.concatenate(norm_weights) if norm_weights else np.zeros(0),
+                       minlength=source.num_predicates).astype(np.float64)
     unique, inverse = np.unique(keys, return_inverse=True)
     support = np.bincount(inverse, weights=weights, minlength=len(unique))
-    table = RelationTable(
-        unique, support / (config.smoothing + norm[unique // target.num_predicates]), target.num_predicates,
-    ).with_fixed(fixed)
+    scale = config.smoothing + norm[unique // target.num_predicates]
+    values = np.divide(support, scale, out=np.zeros(len(support)), where=scale > 0.0)
+    table = RelationTable(unique, values, target.num_predicates).with_fixed(fixed)
     if stats is not None:
         stats["relation_pairs"] = len(table.keys)
     if state is None:
@@ -177,8 +182,9 @@ def _candidates(source, target, x, q, head_match, head_prob, forward, backward, 
         strong = ~weak
         row, group, q_source, q_target, p = row[strong], group[strong], q_source[strong], q_target[strong], p[strong]
         sub, sup = sub[strong], sup[strong]
-    factor = (1.0 - p * sup * (target.functionality[q_target] / epsilon)) * \
-             (1.0 - p * sub * (source.functionality[q_source] / epsilon))
+    # PARIS Eq. 13: each inclusion carries the functionality of its superrelation.
+    factor = (1.0 - p * sub * (target.functionality[q_target] / epsilon)) * \
+             (1.0 - p * sup * (source.functionality[q_source] / epsilon))
     admitted = 1.0 - factor > config.delta
     if stats is not None:
         stats["evidence"] = stats.get("evidence", 0) + int(admitted.sum())
@@ -218,19 +224,26 @@ def _best(candidates, prob, target, embeddings, config, state):
     return x[improved], y[improved], score[improved], considered
 
 
-def _one_to_one(state: ParisState, num_entities: int) -> None:
-    """Each right entity keeps the most probable left entity that points at it."""
-    left = np.arange(num_entities)
-    match, prob = state.left_match[:num_entities], state.left_prob[:num_entities]
-    valid = np.flatnonzero(match >= 0)
-    if len(valid):
-        order = valid[np.lexsort((valid, -prob[valid], match[valid]))]
-        first = np.r_[True, match[order][1:] != match[order][:-1]]
-        winners = order[first]
-        right = match[winners]
-        better = prob[winners] > state.right_prob[right]
-        state.right_match[right[better]] = winners[better]
-        state.right_prob[right[better]] = prob[winners[better]]
-    lost = (match >= 0) & (state.right_match[np.maximum(match, 0)] != left)
-    state.left_match[:num_entities][lost] = -1
-    state.left_prob[:num_entities][lost] = 0.0
+def _one_to_one(state: ParisState, left_entities: int, right_entities: int) -> None:
+    """Each right entity keeps the most probable left entity that points at it, the lower one on ties.
+
+    The right entities' matches are rebuilt from the current left matches, so a
+    right entity never keeps a left entity that has moved to another counterpart.
+    Only a positive probability claims a counterpart. Left entities that lose
+    their counterpart become unmatched.
+    """
+    match, prob = state.left_match[:left_entities], state.left_prob[:left_entities]
+    owners = np.full(right_entities, -1, dtype=state.right_match.dtype)
+    owner_prob = np.zeros(right_entities, dtype=state.right_prob.dtype)
+    pointing = np.flatnonzero(match >= 0)
+    claims = pointing[prob[pointing] > 0]
+    if len(claims):
+        order = claims[np.lexsort((claims, -prob[claims], match[claims]))]
+        winners = order[np.r_[True, match[order][1:] != match[order][:-1]]]
+        owners[match[winners]] = winners
+        owner_prob[match[winners]] = prob[winners]
+    state.right_match[:right_entities] = owners
+    state.right_prob[:right_entities] = owner_prob
+    lost = pointing[owners[match[pointing]] != pointing]
+    state.left_match[lost] = -1
+    state.left_prob[lost] = 0.0

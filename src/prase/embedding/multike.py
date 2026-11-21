@@ -26,8 +26,8 @@ from ..errors import ConfigError, DataError
 from ..kg import ATTRIBUTE, RELATION, entity_names, local_name
 from .base import Embeddings, TrainingData
 from .common import (
-    SeedValidation, check_device, finite_number, fraction, indel_similarity, nearest_neighbors, positive_int,
-    to_embeddings, training_runtime,
+    SeedValidation, check_device, finite_number, fraction, indel_similarity, is_tensor, nearest_neighbors,
+    positive_int, to_embeddings, training_runtime,
 )
 
 _VALUE_PUNCTUATION = str.maketrans({".": "", "(": "", ")": "", ",": "", '"': "", "_": " ", "-": " ", "/": " "})
@@ -97,11 +97,22 @@ class MultiKE:
         if not len(data.seeds):
             raise DataError("MultiKE requires at least one seed pair")
         torch, generator = training_runtime(self.device, seed)
-        validation = SeedValidation(torch, data, seed, self.device, self.epochs)
+        validation = SeedValidation(torch, data, seed, self.device, self.epochs, model=self)
         inputs = _Inputs.build(torch, validation.training, self)
-        literals = _literal_vectors(torch, generator, inputs.texts, self)
+        shape = (len(inputs.texts), self.dim)
+        # A resumed fit reads the literal vectors from its checkpoint instead of training them again.
+        # The literal vectors have the type of the model's tables: PyTorch's default type, which the key covers.
+        saved = validation.saved_state(
+            lambda state: is_tensor(torch, state["literals"], torch.get_default_dtype(), 2, shape[1], rows=shape[0]))
+        literals = saved["literals"] if saved is not None else _literal_vectors(torch, generator, inputs.texts, self)
         training = _Training(torch, generator, inputs, literals, self)
-        training.run(validation)
+        if not training.run(validation, saved_literals=saved is not None):
+            # The checkpoint's literal vectors fit but its other parts did not, so it is discarded. Train once
+            # from the first epoch with literal vectors of this fit, as an uninterrupted fit does.
+            torch, generator = training_runtime(self.device, seed)
+            literals = _literal_vectors(torch, generator, inputs.texts, self)
+            training = _Training(torch, generator, inputs, literals, self)
+            training.run(validation, saved_literals=False)
         left, right = training.vectors().split(inputs.sizes)
         return to_embeddings(left, right, "cosine", info=validation.summary())
 
@@ -153,22 +164,28 @@ class _Inputs:
             name for graph, predicates, local in zip(graphs, settings.names, settings.local_names, strict=True)
             for name in entity_names(graph, predicates, local_names=local)
         ]
-        relations, attributes, sides = [], [], []
+        relations, facts, sides = [], [], []
         for graph, entity, predicate in zip(graphs, entity_offsets, predicate_offsets, strict=True):
             sides.append(tuple(
                 tuple(index + predicate for index, p in enumerate(graph.predicates) if p.kind == kind)
                 for kind in (RELATION, ATTRIBUTE)
             ))
-            relations.extend((h + entity, p + predicate, t + entity) for h, p, t in graph.relation_triples.tolist())
-            counts = Counter(graph.attribute_triples[:, 1].tolist())
+            relations.append(_rows(graph.relation_triples) + (entity, predicate, entity))
+            rows = _rows(graph.attribute_triples)
             values = [literal.translate(_VALUE_PUNCTUATION).strip() for literal in graph.literals]
-            attributes.extend(
-                (h + entity, p + predicate, values[v]) for h, p, v in graph.attribute_triples.tolist()
-                if counts[p] >= settings.attribute_min_count and values[v] and "http" not in values[v]
-            )
-        texts = tuple(sorted({*(name for name in names if name), *(value for _, _, value in attributes)}))
+            usable = np.array([bool(value) and "http" not in value for value in values], dtype=bool)
+            counts = np.bincount(rows[:, 1], minlength=len(graph.predicates))
+            rows = rows[(counts[rows[:, 1]] >= settings.attribute_min_count) & usable[rows[:, 2]]]
+            facts.append((rows + (entity, predicate, 0), values))
+        used = {values[v] for rows, values in facts for v in np.unique(rows[:, 2]).tolist()}
+        texts = tuple(sorted({*(name for name in names if name), *used}))
         index = {text: position for position, text in enumerate(texts)}
-        attributes = sorted({(h, p, index[value]) for h, p, value in attributes})
+        attributes = []
+        for rows, values in facts:
+            rows[:, 2] = np.array([index.get(value, -1) for value in values], dtype=np.int64)[rows[:, 2]]
+            attributes.append(rows)
+        relations = _sorted_rows(np.concatenate(relations))
+        attributes = _sorted_rows(np.concatenate(attributes), unique=True)
 
         counterpart = {}
         for left, right in data.seed_pairs:
@@ -176,18 +193,41 @@ class _Inputs:
             if left in counterpart or right in counterpart:
                 raise DataError("MultiKE requires one-to-one seed pairs")
             counterpart[left], counterpart[right] = right, left
-        swapped_relations = {(counterpart[h], p, t) for h, p, t in relations if h in counterpart}
-        swapped_relations |= {(h, p, counterpart[t]) for h, p, t in relations if t in counterpart}
-        swapped_attributes = {(counterpart[h], p, v) for h, p, v in attributes if h in counterpart}
+        mapping = np.full(sum(sizes), -1, dtype=np.int64)
+        if counterpart:
+            mapping[list(counterpart)] = list(counterpart.values())
+        swapped_relations = _sorted_rows(np.concatenate(
+            (_swap(relations, mapping, 0), _swap(relations, mapping, 2))), unique=True)
+        swapped_attributes = _sorted_rows(_swap(attributes, mapping, 0), unique=True)
 
         def table(rows):
-            return torch.tensor(sorted(rows), dtype=torch.long, device=settings.device).reshape(-1, 3)
+            return torch.as_tensor(rows, dtype=torch.long, device=settings.device).reshape(-1, 3)
 
         return cls(
             sizes, texts, torch.tensor([index[name] if name else -1 for name in names], device=settings.device),
             tuple(local_name(p.name) for graph in graphs for p in graph.predicates), tuple(sides),
             table(relations), table(attributes), table(swapped_relations), table(swapped_attributes),
         )
+
+
+def _rows(triples) -> np.ndarray:
+    return np.asarray(triples, dtype=np.int64).reshape(-1, 3)
+
+
+def _sorted_rows(rows: np.ndarray, *, unique: bool = False) -> np.ndarray:
+    """Rows in lexicographic order, as ``sorted`` orders tuples, optionally without repeats."""
+    rows = rows[np.lexsort(rows.T[::-1])]
+    if unique and len(rows):
+        rows = rows[np.r_[True, (rows[1:] != rows[:-1]).any(axis=1)]]
+    return rows
+
+
+def _swap(rows: np.ndarray, mapping: np.ndarray, column: int) -> np.ndarray:
+    """The rows whose entity in ``column`` has a counterpart, with that counterpart in its place."""
+    counterparts = mapping[rows[:, column]]
+    swapped = rows[counterparts >= 0].copy()
+    swapped[:, column] = counterparts[counterparts >= 0]
+    return swapped
 
 
 # Literal vectors ------------------------------------------------------------
@@ -417,7 +457,8 @@ class _Training:
         F = self.functional
         for batch in self._batches(self.inputs.relations):
             negatives, valid = self._corrupt(batch)
-            loss = F.softplus(self._translation(batch)).sum() + (F.softplus(-self._translation(negatives)) * valid).sum()
+            loss = F.softplus(self._translation(batch)).sum()
+            loss += (F.softplus(-self._translation(negatives)) * valid).sum()
             loss += self._translation(batch, head=self.shared).sum() + self._translation(batch, tail=self.shared).sum()
             loss += 0.5 * self._name_pull(batch[:, [0, 2]].flatten())
             _step(self.optimizer, loss)
@@ -446,7 +487,9 @@ class _Training:
             losses = cost(rows[batch])
             _step(self.optimizer, (losses if weights is None else losses * weights[batch]).sum())
 
-    def run(self, validation: SeedValidation) -> None:
+    def run(self, validation: SeedValidation, *, saved_literals: bool) -> bool:
+        """Train and return True, or return False without training when the literal vectors came from a
+        checkpoint that the rest of its parts do not fit."""
         F, inputs, settings = self.functional, self.inputs, self.settings
         relation_pairs, attribute_pairs = (
             _matching_names(inputs.predicates[0][kind], inputs.predicates[1][kind], inputs.predicate_names,
@@ -460,7 +503,34 @@ class _Training:
         def encode():
             return F.normalize(self.shared, dim=1).split(inputs.sizes)
 
-        for epoch in range(1, settings.epochs + 1):
+        def state():
+            return {"literals": self.values, "attribute_weights": self.attribute_weights,
+                    "matched": [list(matched_relations), list(matched_attributes)]}
+
+        def state_fits(saved):
+            torch, matched = self.torch, saved["matched"]
+            entities = len(self.entity_ids)
+            # Relation facts end in an entity, attribute facts in a literal value.
+            limits = ((entities, self.predicate_count, entities), (entities, self.predicate_count, len(self.values)))
+            return (is_tensor(torch, saved["attribute_weights"], self.attribute_weights.dtype, 1,
+                              rows=len(self.attribute_weights))
+                    and isinstance(matched, list) and len(matched) == 2
+                    and all(isinstance(part, list) and len(part) == 2
+                            and is_tensor(torch, part[0], torch.long, 2, 3, limits=bounds)
+                            and is_tensor(torch, part[1], self.attribute_weights.dtype, 1, rows=len(part[0]))
+                            for part, bounds in zip(matched, limits, strict=True)))
+
+        tensors = self.optimizer.param_groups[0]["params"]
+        optimizers = (self.optimizer, self.view_optimizer)
+        first = validation.resume(self.generator, tensors, optimizers, best=lambda: (self.shared,), check=state_fits,
+                                  state=state)
+        if saved_literals and first == 1:
+            return False
+        if first > 1:
+            saved = validation.saved_state()
+            self.attribute_weights = saved["attribute_weights"]
+            matched_relations, matched_attributes = (tuple(part) for part in saved["matched"])
+        for epoch in range(first, settings.epochs + 1):
             predicates_on = epoch > settings.predicate_start
             self._relation_view()
             self._common_space()
@@ -482,7 +552,9 @@ class _Training:
                 matched_relations = _exchange(self.torch, inputs.relations, relations, self.predicate_count)
                 matched_attributes = _exchange(self.torch, inputs.attributes, attributes, self.predicate_count)
                 self._weigh_attributes(attributes)
+            validation.checkpoint(epoch)
         validation.restore((self.shared,))
+        return True
 
     def vectors(self):
         with self.torch.no_grad():

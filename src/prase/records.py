@@ -12,12 +12,14 @@ Layout::
         proposals.tsv        pairs proposed for the next reasoning step
         embeddings.npz       entity vectors, when saving embeddings is enabled
         step.json            timing, counts, the training summary, and proposal precision with a reference
+    checkpoint/              step results and training state for resuming the run, removed when it finishes
 """
 
 from __future__ import annotations
 
 import json
 import platform
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -27,6 +29,7 @@ import numpy as np
 from . import __version__
 from .alignment import write_predicate_matches
 from .errors import DataError
+from .files import atomic_write_text
 
 if TYPE_CHECKING:
     from .kg import KG
@@ -36,11 +39,20 @@ if TYPE_CHECKING:
 class RunWriter:
     def __init__(
         self, directory: str | Path, pipeline: Pipeline, left: KG, right: KG, seed: int, save_embeddings: bool,
+        *, resume: bool = False,
     ) -> None:
         self.directory = Path(directory)
-        if self.directory.exists() and any(self.directory.iterdir()):
-            raise DataError(f"{self.directory}: choose a new or empty output directory")
+        if self.directory.exists() and not self.directory.is_dir():
+            raise DataError(f"{self.directory} is a file, not an output directory")
+        resumed = self.directory.exists() and any(self.directory.iterdir())
+        if resumed:
+            if not resume:
+                raise DataError(f"{self.directory}: choose a new or empty output directory, or resume the run in it")
+            if not (self.directory / "run.json").is_file():
+                raise DataError(f"{self.directory}: there is no run to resume here")
         self.directory.mkdir(parents=True, exist_ok=True)
+        self.resumed = resumed
+        self.written: set[str] = set()
         self.left, self.right = left, right
         self.save_embeddings = save_embeddings
         self.run: dict[str, Any] = {
@@ -55,11 +67,16 @@ class RunWriter:
             ],
             "records": [],
         }
+        if resumed:
+            self.run["resumed"] = True
         self._write_run()
 
     def step(self, record: StepRecord, before: State, after: State) -> None:
         folder = self.directory / f"{record.index:02d}-{record.name}"
-        folder.mkdir()
+        # A resumed run replaces the files that the earlier run wrote for this step.
+        _remove_step_outputs(folder)
+        folder.mkdir(exist_ok=True)
+        self.written.add(folder.name)
         if after.alignment is not before.alignment:
             after.alignment.write(folder / "alignment.tsv", self.left, self.right)
         if after.predicates is not before.predicates and after.predicates:
@@ -78,6 +95,11 @@ class RunWriter:
         self._write_run()
 
     def finish(self, result: RunResult) -> None:
+        if self.resumed:
+            # Step folders of the earlier run that this run did not write again.
+            for entry in self.directory.iterdir():
+                if entry.is_dir() and _STEP_FOLDER.fullmatch(entry.name) and entry.name not in self.written:
+                    _remove_step_outputs(entry)
         result.alignment.write(self.directory / "alignment.tsv", self.left, self.right)
         self.run["finished"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         self.run["seconds"] = result.seconds
@@ -88,6 +110,22 @@ class RunWriter:
 
     def _write_run(self) -> None:
         _write_json(self.directory / "run.json", self.run)
+
+
+_STEP_FOLDER = re.compile(r"\d{2,}-.+")
+_STEP_OUTPUTS = ("alignment.tsv", "predicates.tsv", "proposals.tsv", "embeddings.npz", "step.json")
+
+
+def _remove_step_outputs(folder: Path) -> None:
+    """Remove the files a run writes in a step folder, and the folder once it is empty. Other files stay."""
+    if not folder.is_dir():
+        return
+    for name in _STEP_OUTPUTS:
+        (folder / name).unlink(missing_ok=True)
+    try:
+        folder.rmdir()
+    except OSError:
+        pass
 
 
 def describe(step: object) -> dict[str, Any]:
@@ -133,13 +171,12 @@ def _record(record: StepRecord) -> dict[str, Any]:
         "scores": None if record.scores is None else record.scores.as_dict(),
         "proposal_precision": record.proposal_precision,
         "observations": _plain(record.observations),
+        **({"resumed": True} if record.resumed else {}),
     }
 
 
 def _write_json(path: Path, value: Any) -> None:
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False, default=_default) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    atomic_write_text(path, json.dumps(value, indent=2, ensure_ascii=False, default=_default) + "\n")
 
 
 def _default(value: Any) -> Any:

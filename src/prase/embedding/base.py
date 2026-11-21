@@ -90,14 +90,24 @@ class Embeddings:
         return self.left.shape[1]
 
     def cosine(self, left: np.ndarray, right: np.ndarray) -> np.ndarray:
-        """Cosine similarity of each ``(left[k], right[k])`` pair. Zero vectors score 0."""
+        """Cosine similarity of each ``(left[k], right[k])`` pair. Zero vectors score 0.
+
+        The sums run over the dimensions in order, in float64, as the native
+        PARIS engine computes them, so both engines give the same scores to the
+        last bit and break ties alike.
+        """
         result = np.empty(len(left), dtype=np.float64)
         rows = max(1, _BLOCK_ENTRIES // (4 * self.dim))
         for start in range(0, len(left), rows):
-            a = self.left[left[start:start + rows]].astype(np.float64)
-            b = self.right[right[start:start + rows]].astype(np.float64)
-            norms = np.sqrt(np.einsum("ij,ij->i", a, a) * np.einsum("ij,ij->i", b, b))
-            dots = np.einsum("ij,ij->i", a, b)
+            # One contiguous row per dimension.
+            a = np.ascontiguousarray(self.left[left[start:start + rows]].T, dtype=np.float64)
+            b = np.ascontiguousarray(self.right[right[start:start + rows]].T, dtype=np.float64)
+            dots, left_norms, right_norms, product = (np.zeros(a.shape[1]) for _ in range(4))
+            for x, y in zip(a, b, strict=True):
+                np.add(dots, np.multiply(x, y, out=product), out=dots)
+                np.add(left_norms, np.multiply(x, x, out=product), out=left_norms)
+                np.add(right_norms, np.multiply(y, y, out=product), out=right_norms)
+            norms = np.sqrt(left_norms * right_norms)
             result[start:start + rows] = np.divide(dots, norms, out=np.zeros_like(dots), where=norms > 0)
         return result
 
@@ -162,16 +172,35 @@ class Embeddings:
         return forward.subset(best[forward.right] == forward.left)
 
     def ranks(self, left: np.ndarray, right: np.ndarray) -> np.ndarray:
-        """Rank (from 1) of ``right[k]`` among all of ``right`` for each ``left[k]``."""
+        """Rank (from 1) of ``right[k]`` among the distinct entities of ``right`` for each ``left[k]``.
+
+        Candidates with an equal score rank in the order in which they first
+        appear in ``right``, as in retrieval, which picks the first of them.
+        """
+        right = np.asarray(right)
+        values, first, inverse = np.unique(right, return_index=True, return_inverse=True)
+        order = np.argsort(first, kind="stable")
+        pool = values[order]
+        position = np.empty(len(order), dtype=np.int64)
+        position[order] = np.arange(len(order))
+        targets = position[inverse.reshape(-1)]
         ranks = np.empty(len(left), dtype=np.int64)
         if self.device == "cpu":
-            for start, block in self._blocks(left, right):
-                gold = block[np.arange(len(block)), np.arange(start, start + len(block))]
-                ranks[start:start + len(block)] = (block > gold[:, None]).sum(axis=1) + 1
+            columns = np.arange(len(pool))
+            for start, block in self._blocks(left, pool):
+                gold_columns = targets[start:start + len(block)]
+                gold = block[np.arange(len(block)), gold_columns][:, None]
+                ahead = (block > gold) | ((block == gold) & (columns[None, :] < gold_columns[:, None]))
+                ranks[start:start + len(block)] = ahead.sum(axis=1) + 1
         else:
-            for start, block in self._cuda_blocks(left, right):
-                gold = block[:, start:start + len(block)].diagonal()
-                ranks[start:start + len(block)] = ((block > gold[:, None]).sum(dim=1) + 1).cpu().numpy()
+            import torch
+
+            columns = torch.arange(len(pool), device=self.device)
+            for start, block in self._cuda_blocks(left, pool):
+                gold_columns = torch.as_tensor(targets[start:start + len(block)], device=block.device)
+                gold = block.gather(1, gold_columns[:, None])
+                ahead = (block > gold) | ((block == gold) & (columns[None, :] < gold_columns[:, None]))
+                ranks[start:start + len(block)] = (ahead.sum(dim=1) + 1).cpu().numpy()
         return ranks
 
     def _blocks(self, left: np.ndarray, right: np.ndarray):

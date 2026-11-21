@@ -1,0 +1,17 @@
+# IMUSE (He et al., DASFAA 2019) as a supervised embedding model, without PARIS.
+#
+# The embedding-only method trains IMUSE on labeled seed pairs and proposes mutual
+# nearest neighbors as counterparts. [method] takes the settings of a run file's
+# [method] table (src/prase/config.py); `options` are IMUSE's settings.
+
+[method]
+name = "embedding-only"
+model = "imuse"
+
+# Per-dataset IMUSE options, merged over [method].options, as in OpenEA: on the
+# 100K datasets, IMUSE trains on batches of 20,000 triples instead of 5,000.
+[dataset_options]
+EN-FR-100K-V2 = { batch_size = 20000 }
+EN-DE-100K-V2 = { batch_size = 20000 }
+D-W-100K-V2 = { batch_size = 20000 }
+D-Y-100K-V2 = { batch_size = 20000 }

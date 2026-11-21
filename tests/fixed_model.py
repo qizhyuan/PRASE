@@ -32,3 +32,22 @@ class FixedModel:
         pairs = data.seeds if self.reference is None else np.asarray(self.reference)
         right[pairs[:, 1]] = left[pairs[:, 0]]
         return Embeddings(left, right)
+
+
+class StableModel:
+    """Seeded random vectors, equal for seed pairs. Its checkpoint key describes it fully, so runs can resume it."""
+
+    name = "stable"
+
+    def __init__(self, dim: int = 4):
+        self.dim = dim
+
+    def checkpoint_key(self) -> dict:
+        return {"dim": self.dim}
+
+    def fit(self, data: TrainingData, *, seed: int) -> Embeddings:
+        rng = np.random.default_rng(seed)
+        left = rng.normal(size=(data.left.num_entities, self.dim))
+        right = rng.normal(size=(data.right.num_entities, self.dim))
+        right[data.seeds[:, 1]] = left[data.seeds[:, 0]]
+        return Embeddings(left, right, info={"epochs": 1})

@@ -1,0 +1,9 @@
+# MTransE (Chen et al., IJCAI 2017) as a supervised embedding model, without PARIS.
+#
+# The embedding-only method trains MTransE on labeled seed pairs and proposes mutual
+# nearest neighbors as counterparts. [method] takes the settings of a run file's
+# [method] table (src/prase/config.py). MTransE runs with its default options.
+
+[method]
+name = "embedding-only"
+model = "mtranse"

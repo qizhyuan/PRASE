@@ -61,6 +61,20 @@ jobs:
           name: sdist
           path: dist/*.tar.gz
 
+  training-tests:
+    name: Tests with the embedding models
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The wheel and sdist tests skip the PyTorch and RapidFuzz tests. This job runs
+      # them on the CPU build of PyTorch, with the native engine built from the checkout.
+      - run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: python -m pip install ".[train,rdf]"
+      - run: python -m unittest discover -s tests -v
+
   check-version:
     name: Check the release version
     if: startsWith(github.ref, 'refs/tags/v')
@@ -81,7 +95,7 @@ jobs:
   publish-testpypi:
     name: Publish to TestPyPI
     if: github.event_name == 'workflow_dispatch'
-    needs: [wheels, sdist]
+    needs: [wheels, sdist, training-tests]
     runs-on: ubuntu-latest
     environment:
       name: testpypi
@@ -101,7 +115,7 @@ jobs:
   publish-pypi:
     name: Publish to PyPI
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [wheels, sdist, check-version]
+    needs: [wheels, sdist, training-tests, check-version]
     runs-on: ubuntu-latest
     environment:
       name: pypi

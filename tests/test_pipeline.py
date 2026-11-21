@@ -1,4 +1,6 @@
+import importlib.util
 import json
+import shutil
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -9,15 +11,61 @@ from unittest.mock import call, patch
 
 import numpy as np
 
-from fixed_model import FixedModel
+from fixed_model import FixedModel, StableModel
 from fixtures import graph_pair, write_openea
 from prase import (
-    Alignment, ConfigError, Decisions, Embed, Embeddings, Load, NameMatch, ParisConfig, ParisStep, Pipeline,
-    Predict, evaluate, load_config, load_dataset, methods,
+    Alignment, CheckpointPolicy, ConfigError, DataError, Decisions, Embed, Embeddings, Load, NameMatch, ParisConfig,
+    ParisStep, Pipeline, Predict, evaluate, load_config, load_dataset, methods,
 )
 from prase.cli import main
 
 FAST = ParisConfig(engine="python")
+
+
+def _record_mutations(record):
+    """Copies of a step checkpoint record with one field removed or replaced."""
+    import copy
+
+    def walk(value, path):
+        yield path, value
+        if isinstance(value, dict):
+            for key, item in value.items():
+                yield from walk(item, (*path, key))
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                yield from walk(item, (*path, index))
+
+    for path, value in list(walk(record, ())):
+        if not path:
+            continue
+        for description, replacement in (("removed", None), ("replaced by text", "damaged"), ("negative", -1)):
+            if description == "negative" and (isinstance(value, bool) or not isinstance(value, (int, float))):
+                continue
+            mutated = copy.deepcopy(record)
+            container = mutated
+            for key in path[:-1]:
+                container = container[key]
+            if description == "removed":
+                del container[path[-1]]
+            else:
+                container[path[-1]] = replacement
+            yield f"{'/'.join(map(str, path))} {description}", mutated
+
+
+def _array_mutations(arrays, sizes):
+    """Copies of a step checkpoint's arrays with one array removed, shortened, retyped, or out of range."""
+    for name, value in arrays.items():
+        others = {key: item for key, item in arrays.items() if key != name}
+        yield f"{name} removed", others
+        if len(value):
+            yield f"{name} shortened", {**others, name: value[:-1]}
+        yield f"{name} retyped", {**others, name: value.astype(np.float32 if value.dtype != np.float32 else np.int8)}
+        if len(value) and value.dtype.kind == "f":
+            broken = value.copy()
+            broken.flat[0] = np.nan
+            yield f"{name} not finite", {**others, name: broken}
+        if len(value) and value.dtype.kind == "i":
+            yield f"{name} out of range", {**others, name: value + max(sizes)}
 
 
 class PipelineTest(unittest.TestCase):
@@ -190,6 +238,359 @@ class PipelineTest(unittest.TestCase):
         with self.assertRaises(ConfigError):
             Pipeline([Predict()]).run(self.left, self.right)
 
+    def test_an_interrupted_run_resumes_from_its_finished_steps(self):
+        pipeline = methods.prase(StableModel(), config=FAST)
+        plain = pipeline.run(self.left, self.right, reference=self.reference, seed=3)
+        original, calls = ParisStep.run, []
+
+        def crash_in_the_second_paris_step(step, state, context):
+            calls.append(step)
+            if len(calls) == 2:
+                raise RuntimeError("interrupted")
+            return original(step, state, context)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "run"
+            with patch.object(ParisStep, "run", crash_in_the_second_paris_step), self.assertRaises(RuntimeError):
+                pipeline.run(self.left, self.right, reference=self.reference, seed=3, output=output)
+            saved = sorted(path.name for path in (output / "checkpoint" / "steps").iterdir())
+            self.assertEqual(saved, ["01-paris.ckpt", "02-embed-stable.ckpt"])
+            with self.assertRaisesRegex(DataError, "resume"):
+                pipeline.run(self.left, self.right, reference=self.reference, seed=3, output=output)
+            with self.assertLogs("prase", "INFO") as logs:
+                resumed = pipeline.run(self.left, self.right, reference=self.reference, seed=3, output=output,
+                                       resume=True)
+            self.assertEqual([record.resumed for record in resumed.steps], [True, True, False])
+            self.assertTrue(any("reused from its checkpoint" in line for line in logs.output))
+            self.assertEqual(resumed.alignment.pairs(), plain.alignment.pairs())
+            np.testing.assert_array_equal(resumed.alignment.score, plain.alignment.score)
+            self.assertEqual([record.values for record in resumed.steps], [record.values for record in plain.steps])
+            self.assertEqual([record.observations for record in resumed.steps],
+                             [record.observations for record in plain.steps])
+            self.assertFalse((output / "checkpoint").exists())
+            run = json.loads((output / "run.json").read_text(encoding="utf-8"))
+            self.assertTrue(run["resumed"])
+            self.assertNotIn("failed", run)
+            self.assertEqual([record.get("resumed", False) for record in run["records"]], [True, True, False])
+            self.assertEqual(sorted(path.name for path in output.iterdir()),
+                             ["01-paris", "02-embed-stable", "03-paris", "alignment.tsv", "run.json"])
+
+    def test_resume_reuses_the_steps_before_a_changed_setting(self):
+        policy = CheckpointPolicy(keep=True)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "run"
+            first = methods.prase(StableModel(), config=FAST).run(self.left, self.right, output=output,
+                                                                    checkpoints=policy)
+            self.assertTrue((output / "checkpoint" / "steps" / "03-paris.ckpt").is_file())
+            again = methods.prase(StableModel(), config=FAST).run(self.left, self.right, output=output,
+                                                                    checkpoints=policy, resume=True)
+            self.assertEqual([record.resumed for record in again.steps], [True, True, True])
+            self.assertEqual(again.alignment.pairs(), first.alignment.pairs())
+            changed = methods.prase(StableModel(), config=FAST, proposal_weight=0.5)
+            third = changed.run(self.left, self.right, output=output, checkpoints=policy, resume=True)
+            self.assertEqual([record.resumed for record in third.steps], [True, True, False])
+            reseeded = methods.prase(StableModel(), config=FAST).run(self.left, self.right, output=output, seed=1,
+                                                                       checkpoints=policy, resume=True)
+            self.assertEqual([record.resumed for record in reseeded.steps], [False, False, False])
+
+    def test_checkpoint_policy_chooses_what_a_run_saves(self):
+        pipeline = methods.prase(StableModel(), config=FAST)
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            pipeline.run(self.left, self.right, output=folder / "none", checkpoints=None)
+            self.assertFalse((folder / "none" / "checkpoint").exists())
+            elsewhere = folder / "elsewhere"
+            pipeline.run(self.left, self.right, checkpoints=CheckpointPolicy(directory=elsewhere, keep=True))
+            self.assertEqual(len(list((elsewhere / "steps").iterdir())), 3)
+            with self.assertRaisesRegex(DataError, "earlier run"):
+                pipeline.run(self.left, self.right, checkpoints=CheckpointPolicy(directory=elsewhere))
+            with self.assertRaisesRegex(ConfigError, "output directory"):
+                pipeline.run(self.left, self.right, resume=True)
+            with self.assertRaisesRegex(ConfigError, "checkpoint policy"):
+                pipeline.run(self.left, self.right, output=folder / "none", checkpoints=None, resume=True)
+            with self.assertRaisesRegex(DataError, "no run to resume"):
+                (folder / "other").mkdir()
+                (folder / "other" / "notes.txt").write_text("mine", encoding="utf-8")
+                pipeline.run(self.left, self.right, output=folder / "other", resume=True)
+        for minutes in (-1, float("nan"), True):
+            with self.subTest(minutes=minutes), self.assertRaises(ConfigError):
+                CheckpointPolicy(training_minutes=minutes)
+
+    def test_checkpoint_cleanup_removes_only_what_prase_wrote(self):
+        pipeline = methods.prase(StableModel(), config=FAST)
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            mine = folder / "mine"
+            mine.mkdir()
+            (mine / "notes.txt").write_text("keep me", encoding="utf-8")
+            with self.assertRaisesRegex(DataError, "did not write"):
+                pipeline.run(self.left, self.right, checkpoints=CheckpointPolicy(directory=mine))
+            with self.assertRaisesRegex(DataError, "did not write"):
+                pipeline.run(self.left, self.right, output=folder / "run", checkpoints=CheckpointPolicy(directory=mine),
+                             resume=True)
+            self.assertEqual([path.name for path in mine.iterdir()], ["notes.txt"])
+            self.assertFalse((folder / "run").exists())
+            for checkpoints, output in (
+                (folder / "out", folder / "out"),  # the output directory itself
+                (folder, folder / "out"),  # a folder that holds the output directory
+                (folder / "out" / "01-paris", folder / "out"),  # a step folder of the run
+            ):
+                with self.subTest(checkpoints=checkpoints), self.assertRaisesRegex(ConfigError, "checkpoint directory"):
+                    pipeline.run(self.left, self.right, output=output,
+                                 checkpoints=CheckpointPolicy(directory=checkpoints))
+            self.assertFalse((folder / "out").exists())
+            # A file added to a checkpoint folder of PRASE survives the cleanup.
+            shared = folder / "shared"
+            original = ParisStep.run
+
+            def add_a_file(step, state, context):
+                (shared / "added.txt").write_text("mine", encoding="utf-8")
+                return original(step, state, context)
+
+            with patch.object(ParisStep, "run", add_a_file):
+                pipeline.run(self.left, self.right, output=folder / "run",
+                             checkpoints=CheckpointPolicy(directory=shared))
+            self.assertEqual([path.name for path in shared.iterdir()], ["added.txt"])
+            self.assertTrue((folder / "run" / "alignment.tsv").is_file())
+
+    def test_a_rejected_resume_leaves_the_finished_run_untouched(self):
+        pipeline = methods.prase(StableModel(), config=FAST)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "run"
+            pipeline.run(self.left, self.right, output=output)
+            before = {path.relative_to(output): path.read_bytes() for path in output.rglob("*") if path.is_file()}
+            for checkpoints, error, message in (
+                (None, ConfigError, "checkpoint policy"),
+                (CheckpointPolicy(), DataError, "nothing to resume"),
+                (CheckpointPolicy(directory=output), ConfigError, "checkpoint directory"),
+            ):
+                with self.subTest(message=message), self.assertRaisesRegex(error, message):
+                    pipeline.run(self.left, self.right, output=output, checkpoints=checkpoints, resume=True)
+            after = {path.relative_to(output): path.read_bytes() for path in output.rglob("*") if path.is_file()}
+            self.assertEqual(after, before)
+
+    def test_resume_rereads_changed_files_and_needs_a_key_for_custom_steps(self):
+        class Halve:
+            name = "halve"
+
+            def __init__(self):
+                self.runs = 0
+
+            def run(self, state, context):
+                self.runs += 1
+                return replace(state, alignment=state.alignment.scaled(0.5))
+
+        class Keyed(Halve):
+            factor = 0.5
+
+            def checkpoint_key(self):
+                return {"factor": self.factor}
+
+        policy = CheckpointPolicy(keep=True)
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            proposals = folder / "proposals.tsv"
+            Alignment(self.reference[:1, 0], self.reference[:1, 1]).write(proposals, self.left, self.right)
+            unkeyed, keyed = Halve(), Keyed()
+            pipeline = Pipeline([Load(proposals), ParisStep(FAST), unkeyed, keyed])
+            pipeline.run(self.left, self.right, output=folder / "run", checkpoints=policy)
+            again = pipeline.run(self.left, self.right, output=folder / "run", checkpoints=policy, resume=True)
+            # A step without checkpoint_key runs again; the next step is reused, as its input is unchanged.
+            self.assertEqual([record.resumed for record in again.steps], [True, True, False, True])
+            self.assertEqual((unkeyed.runs, keyed.runs), (2, 1))
+            # The same proposals file with new content is read again.
+            Alignment(self.reference[1:3, 0], self.reference[1:3, 1]).write(proposals, self.left, self.right)
+            changed = Pipeline([Load(proposals), ParisStep(FAST), Keyed()]).run(
+                self.left, self.right, output=folder / "other", checkpoints=policy)
+            self.assertEqual(changed.steps[0].values["proposals"], 2)
+            resumed = Pipeline([Load(proposals), ParisStep(FAST), Keyed()]).run(
+                self.left, self.right, output=folder / "other", checkpoints=policy, resume=True)
+            self.assertEqual([record.resumed for record in resumed.steps], [True, True, True])
+            Alignment(self.reference[:1, 0], self.reference[:1, 1]).write(proposals, self.left, self.right)
+            reread = Pipeline([Load(proposals), ParisStep(FAST), Keyed()]).run(
+                self.left, self.right, output=folder / "other", checkpoints=policy, resume=True)
+            self.assertEqual([record.resumed for record in reread.steps], [False, False, False])
+            self.assertEqual(reread.steps[0].values["proposals"], 1)
+            # A changed key reruns the custom step.
+            stronger = Keyed()
+            stronger.factor = 0.25
+            rekeyed = Pipeline([Load(proposals), ParisStep(FAST), stronger]).run(
+                self.left, self.right, output=folder / "other", checkpoints=policy, resume=True)
+            self.assertEqual([record.resumed for record in rekeyed.steps], [True, True, False])
+
+    def test_a_literal_matcher_needs_a_key_for_its_step_to_be_reused(self):
+        policy = CheckpointPolicy(keep=True)
+        names = {"value": "x"}
+
+        def captured(left, right):  # reads a setting from outside its source
+            index = {value: j for j, value in enumerate(right.literals)}
+            pairs = [(i, index[value], 1.0) for i, value in enumerate(left.literals)
+                     if value in index and value != names["value"]]
+            return Alignment.from_pairs(pairs)
+
+        def keyed(left, right):
+            return captured(left, right)
+
+        keyed.checkpoint_key = lambda: {"skip": names["value"]}
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "run"
+            for matcher, reused in ((captured, False), (keyed, True)):
+                with self.subTest(matcher=matcher.__name__):
+                    # A second, keyed step keeps a step checkpoint for the finished run to resume from.
+                    pipeline = Pipeline([ParisStep(FAST, literal_matcher=matcher), ParisStep(FAST)])
+                    pipeline.run(self.left, self.right, output=output, checkpoints=policy)
+                    again = pipeline.run(self.left, self.right, output=output, checkpoints=policy, resume=True)
+                    self.assertEqual(again.steps[0].resumed, reused)
+                    names["value"] = self.left.literals[0]
+                    changed = pipeline.run(self.left, self.right, output=output, checkpoints=policy, resume=True)
+                    fresh = pipeline.run(self.left, self.right)
+                    self.assertFalse(changed.steps[0].resumed)
+                    self.assertEqual(changed.alignment.pairs(), fresh.alignment.pairs())
+                    names["value"] = "x"
+                    shutil.rmtree(output)
+
+    def test_invalid_arguments_leave_a_finished_run_untouched(self):
+        pipeline = methods.prase(StableModel(), config=FAST)
+        policy = CheckpointPolicy(keep=True)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "run"
+            pipeline.run(self.left, self.right, output=output, checkpoints=policy)
+            before = {path.relative_to(output): path.read_bytes() for path in output.rglob("*") if path.is_file()}
+            for arguments in ({"seed": -1}, {"seed": 1.5}, {"seed": True}, {"save_embeddings": "yes"},
+                              {"seeds": Alignment([self.left.num_entities], [0])},
+                              {"seeds": Alignment([0], [0], [np.nan])},
+                              {"reference": np.array([[0, self.right.num_entities]])},
+                              {"checkpoints": "keep"}):
+                with self.subTest(arguments=arguments), self.assertRaises((ConfigError, DataError)):
+                    pipeline.run(self.left, self.right, output=output, resume=True,
+                                 **{"checkpoints": policy, **arguments})
+            after = {path.relative_to(output): path.read_bytes() for path in output.rglob("*") if path.is_file()}
+            self.assertEqual(after, before)
+        with self.assertRaisesRegex(ConfigError, "plain folder name"):
+            Pipeline([replace(ParisStep(FAST), name="../outside")])
+        for flag in ("steps", "training", "keep"):
+            with self.subTest(flag=flag), self.assertRaisesRegex(ConfigError, flag):
+                CheckpointPolicy(**{flag: "no"})
+
+    @unittest.skipUnless(importlib.util.find_spec("torch"), "PyTorch is not installed")
+    def test_a_failure_after_training_keeps_the_finished_fit(self):
+        from prase.embedding.gcnalign import GCNAlign
+
+        pipeline = methods.prase("gcnalign", options={"epochs": 30, "dim": 8}, config=FAST)
+        plain = pipeline.run(self.left, self.right)
+        original, calls = GCNAlign.propose, []
+
+        def fails_once(model, embeddings, data):
+            calls.append(model)
+            if len(calls) == 1:
+                raise RuntimeError("retrieval failed")
+            return original(model, embeddings, data)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "run"
+            with patch.object(GCNAlign, "propose", fails_once):
+                with self.assertRaises(RuntimeError):
+                    pipeline.run(self.left, self.right, output=output)
+                self.assertEqual(len(list((output / "checkpoint" / "training").glob("*.ckpt"))), 1)
+                with self.assertLogs("prase", "INFO") as logs:
+                    resumed = pipeline.run(self.left, self.right, output=output, resume=True)
+            self.assertTrue(any("reused the finished fit" in line for line in logs.output))
+            self.assertEqual(resumed.alignment.pairs(), plain.alignment.pairs())
+            self.assertFalse((output / "checkpoint").exists())
+
+    def test_cleanup_keeps_the_files_that_prase_did_not_write(self):
+        pipeline = methods.prase(StableModel(), config=FAST)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "run"
+            pipeline.run(self.left, self.right, output=output, checkpoints=CheckpointPolicy(keep=True))
+            checkpoint = output / "checkpoint"
+            foreign = [checkpoint / "training" / "my-own-model.pt", checkpoint / "training" / ".prase-mine.tmp",
+                       checkpoint / "steps" / "notes.txt", checkpoint / "steps" / "04-mine.ckpt"]
+            for path in foreign:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"another tool's file")
+            pipeline.run(self.left, self.right, output=output, resume=True)
+            self.assertTrue(all(path.read_bytes() == b"another tool's file" for path in foreign))
+            remaining = sorted(path.relative_to(checkpoint).as_posix() for path in checkpoint.rglob("*")
+                               if path.is_file())
+            self.assertEqual(remaining, sorted(path.relative_to(checkpoint).as_posix() for path in foreign))
+
+    def test_concurrent_saves_of_one_checkpoint_all_succeed(self):
+        import threading
+
+        from prase.checkpoints import read_step_state, write_step_state
+
+        arrays = {"values": np.arange(100_000, dtype=np.float64)}
+        errors = []
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "steps" / "01-paris.ckpt"
+            start = threading.Barrier(4)
+
+            def save(number):
+                start.wait()
+                for attempt in range(10):
+                    try:
+                        write_step_state(path, {"key": "k", "writer": number, "attempt": attempt}, arrays)
+                    except Exception as error:  # noqa: BLE001 - collected for the assertion
+                        errors.append(error)
+
+            threads = [threading.Thread(target=save, args=(number,)) for number in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            self.assertEqual(errors, [])
+            meta, saved = read_step_state(path)
+            self.assertEqual(meta["key"], "k")
+            np.testing.assert_array_equal(saved["values"], arrays["values"])
+            self.assertEqual([item.name for item in path.parent.iterdir()], [path.name])
+
+    def test_every_damaged_part_of_a_step_checkpoint_runs_the_step_again(self):
+        """Damage each field of every step's record and arrays: a resumed run must match an uninterrupted one."""
+        from prase.checkpoints import read_step_state, write_step_state
+
+        pipeline = methods.prase(StableModel(), config=FAST)
+        policy = CheckpointPolicy(keep=True)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "run"
+            first = pipeline.run(self.left, self.right, output=output, checkpoints=policy)
+            steps = output / "checkpoint" / "steps"
+            genuine = {path: path.read_bytes() for path in steps.glob("*.ckpt")}
+            self.assertEqual(len(genuine), 3)
+
+            def restore():
+                for path, content in genuine.items():
+                    path.write_bytes(content)
+
+            def resumed_run():
+                with self.assertNoLogs("prase", "ERROR"):
+                    result = pipeline.run(self.left, self.right, output=output, checkpoints=policy, resume=True)
+                self.assertEqual(result.alignment.pairs(), first.alignment.pairs())
+                np.testing.assert_array_equal(result.alignment.score, first.alignment.score)
+                restore()
+                return result
+
+            for path in sorted(genuine):
+                record, arrays = read_step_state(path)
+                # A changed byte fails the digest, so the file is not used at all.
+                damaged = bytearray(genuine[path])
+                damaged[-5] ^= 0xFF
+                with self.subTest(step=path.name, damage="a changed byte"):
+                    path.write_bytes(bytes(damaged))
+                    resumed_run()
+                # Damage sealed with a new digest must fail the checks of the record and arrays.
+                for name, value in _record_mutations(record):
+                    with self.subTest(step=path.name, field=name):
+                        write_step_state(path, value, arrays)
+                        resumed_run()
+                for name, value in _array_mutations(arrays, (self.left.num_entities, self.right.num_entities)):
+                    with self.subTest(step=path.name, array=name):
+                        write_step_state(path, record, value)
+                        resumed_run()
+            # With the genuine checkpoints, every step is reused.
+            again = pipeline.run(self.left, self.right, output=output, checkpoints=policy, resume=True)
+            self.assertEqual([step.resumed for step in again.steps], [True, True, True])
+
 
 class NameMatchTest(unittest.TestCase):
     def test_names_match_by_edit_similarity(self):
@@ -251,6 +652,51 @@ class ConfigTest(unittest.TestCase):
             with redirect_stdout(stdout):
                 main(["evaluate", str(folder / "out" / "alignment.tsv"), "--dataset", str(folder / "pair")])
             self.assertIn("F1=", stdout.getvalue())
+
+    def test_cli_rejects_an_invalid_seed_before_touching_the_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            path = self.write(folder, (
+                '[input]\ndataset = "pair"\n[method]\nname = "paris"\nparis = { engine = "python" }\n'
+                '[output]\ndirectory = "out"\n'))
+            with redirect_stdout(StringIO()):
+                self.assertEqual(main(["run", str(path), "--quiet", "--keep-checkpoints"]), 0)
+            output = folder / "out"
+            before = {item.relative_to(output): item.read_bytes() for item in output.rglob("*") if item.is_file()}
+            with redirect_stderr(StringIO()) as stderr:
+                self.assertEqual(main(["run", str(path), "--quiet", "--resume", "--seed", "-1"]), 2)
+            self.assertIn("seed", stderr.getvalue())
+            after = {item.relative_to(output): item.read_bytes() for item in output.rglob("*") if item.is_file()}
+            self.assertEqual(after, before)
+
+    def test_run_files_and_cli_choose_the_checkpoint_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            base = '[input]\ndataset = "pair"\n[method]\nname = "paris"\nparis = { engine = "python" }\n'
+            self.assertEqual(load_config(self.write(folder, base)).checkpoints, CheckpointPolicy())
+            off = load_config(self.write(folder / "off", base + '[output]\ncheckpoints = false\n'))
+            self.assertIsNone(off.checkpoints)
+            chosen = load_config(self.write(folder / "chosen", base + (
+                '[output.checkpoints]\ntraining_minutes = 2.5\nkeep = true\ndirectory = "saved"\n')))
+            self.assertEqual(chosen.checkpoints,
+                             CheckpointPolicy(training_minutes=2.5, keep=True, directory=folder / "chosen" / "saved"))
+            for table, error in (('keep = "yes"', "true or false"), ("every = 3", "unknown setting"),
+                                 ("training_minutes = -1", "nonnegative")):
+                with self.subTest(table=table), self.assertRaisesRegex(ConfigError, error):
+                    load_config(self.write(folder / "bad", base + f'[output.checkpoints]\n{table}\n'))
+            path = self.write(folder / "cli", base + '[output]\ndirectory = "out"\n')
+            with redirect_stdout(StringIO()):
+                self.assertEqual(main(["run", str(path), "--quiet", "--keep-checkpoints"]), 0)
+            self.assertTrue((folder / "cli" / "out" / "checkpoint" / "steps" / "01-paris.ckpt").is_file())
+            with redirect_stdout(StringIO()):
+                self.assertEqual(main(["run", str(path), "--quiet", "--resume"]), 0)
+            run = json.loads((folder / "cli" / "out" / "run.json").read_text(encoding="utf-8"))
+            self.assertTrue(run["resumed"])
+            self.assertTrue(run["records"][0]["resumed"])
+            self.assertFalse((folder / "cli" / "out" / "checkpoint").exists())
+            with redirect_stderr(StringIO()) as stderr:
+                self.assertEqual(main(["run", str(path), "--quiet", "--no-checkpoints", "--resume"]), 2)
+            self.assertIn("--no-checkpoints", stderr.getvalue())
 
     def test_step_tables_and_custom_steps(self):
         with tempfile.TemporaryDirectory() as directory:

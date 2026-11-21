@@ -1,0 +1,9 @@
+# GCNAlign (Wang et al., EMNLP 2018) as a supervised embedding model, without PARIS.
+#
+# The embedding-only method trains GCNAlign on labeled seed pairs and proposes mutual
+# nearest neighbors as counterparts. [method] takes the settings of a run file's
+# [method] table (src/prase/config.py). GCNAlign runs with its default options.
+
+[method]
+name = "embedding-only"
+model = "gcnalign"

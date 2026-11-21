@@ -46,6 +46,17 @@ class SessionTest(unittest.TestCase):
         with self.assertRaisesRegex(DataError, "unknown left entity"):
             self.session.candidates("missing")
 
+    def test_match_reports_the_accepted_pair_and_its_probability(self):
+        with self.assertRaises(DataError):
+            self.session.match(self.left.entities[0])
+        self.session.run()
+        recorded = {a: (b, score) for a, b, score in self.session.matches()}
+        for entity in self.left.entities:
+            with self.subTest(entity=entity):
+                self.assertEqual(self.session.match(entity), recorded.get(entity))
+        with self.assertRaisesRegex(DataError, "unknown left entity"):
+            self.session.match("missing")
+
     def test_embeddings_add_similarity_to_candidates(self):
         with self.assertRaisesRegex(DataError, "one vector per entity"):
             self.session.set_embeddings(Embeddings(np.ones((2, 3)), np.ones((2, 3))))
@@ -54,6 +65,11 @@ class SessionTest(unittest.TestCase):
         self.session.run()
         entity = self.session.matches()[0][0]
         self.assertTrue(all(candidate.similarity == 1.0 for _, candidate in self.session.candidates(entity)))
+        # New embeddings take effect on the next run, not on the review of the last one.
+        before = self.session.candidates(entity)
+        self.session.set_embeddings(Embeddings(-np.ones((self.left.num_entities, 3)),
+                                               np.ones((self.right.num_entities, 3))))
+        self.assertEqual(self.session.candidates(entity), before)
         self.session.set_embeddings(None)
         self.session.run()
         self.assertTrue(all(candidate.similarity is None for _, candidate in self.session.candidates(entity)))

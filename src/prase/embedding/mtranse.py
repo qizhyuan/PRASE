@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ..alignment import Alignment
 from ..errors import ConfigError, DataError
 from .base import Embeddings, TrainingData
 from .common import SeedValidation, check_device, finite_number, positive_int, to_embeddings, training_runtime
@@ -13,6 +14,7 @@ class MTransE:
     Training minimizes the distance of positive triples in both graphs and the
     distance between mapped seed pairs. ``alpha`` weights the alignment
     objective, and an orthogonality penalty keeps the map close to a rotation.
+    Proposals are mutual nearest neighbors.
     """
 
     name = "mtranse"
@@ -38,11 +40,15 @@ class MTransE:
         if self.learning_rate <= 0 or self.alpha <= 0:
             raise ConfigError("learning_rate and alpha must be positive")
 
+    def propose(self, embeddings: Embeddings, data: TrainingData) -> Alignment:
+        """Propose mutual nearest neighbors among the candidates."""
+        return embeddings.reciprocal_nearest(*data.candidates, excluded=data.rejected)
+
     def fit(self, data: TrainingData, *, seed: int) -> Embeddings:
         if not len(data.seeds):
             raise DataError("MTransE requires at least one seed pair")
         torch, generator = training_runtime(self.device, seed)
-        validation = SeedValidation(torch, data, seed, self.device, self.epochs)
+        validation = SeedValidation(torch, data, seed, self.device, self.epochs, model=self)
         left, right = self._train(torch, generator, validation)
         return to_embeddings(left, right, "cosine", info=validation.summary())
 
@@ -85,7 +91,9 @@ class MTransE:
             mapped_left = normalize(normalize(entities[:left_size], dim=1) @ transform, dim=1)
             return mapped_left, normalize(entities[left_size:], dim=1)
 
-        for epoch in range(1, self.epochs + 1):
+        tensors, optimizers = (entities, relations, transform), (triple_optimizer, mapping_optimizer)
+        first = validation.resume(generator, tensors, optimizers, best=encode)
+        for epoch in range(first, self.epochs + 1):
             order = torch.randperm(len(triples), device=self.device, generator=generator)
             for batch in order.split(self.batch_size):
                 head, predicate, tail = triples[batch].T
@@ -106,6 +114,7 @@ class MTransE:
                 mapping_optimizer.step()
             if validation.stop(epoch, encode):
                 break
+            validation.checkpoint(epoch)
 
         return validation.vectors(encode)
 

@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "prase"
-version = "1.0.0"
+version = "1.0.1"
 description = "Probabilistic reasoning and semantic embedding for knowledge graph alignment"
 readme = "README.md"
 authors = [{ name = "Zhiyuan Qi" }]

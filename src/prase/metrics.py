@@ -29,7 +29,9 @@ class Scores:
         return asdict(self)
 
 
-def evaluate(alignment: Alignment, reference: np.ndarray | Iterable[tuple[int, int]], *, threshold: float = 0.0) -> Scores:
+def evaluate(
+    alignment: Alignment, reference: np.ndarray | Iterable[tuple[int, int]], *, threshold: float = 0.0,
+) -> Scores:
     """Precision, recall, and F1 of the pairs scoring at least ``threshold``."""
     gold = _pair_set(reference)
     predicted = alignment.above(threshold).pairs() if threshold > 0 else alignment.pairs()
@@ -53,7 +55,7 @@ def ranking_scores(
     """Hits@k, mean rank, and MRR of each left entity among the right entities of ``pairs``.
 
     This is the OpenEA test protocol: the candidates of a test entity are the
-    counterparts of all test links, ranked by the model's own metric.
+    distinct counterparts of all test links, ranked by the model's own metric.
     """
     pairs = np.asarray(pairs, dtype=np.int64).reshape(-1, 2)
     if not len(pairs):

@@ -1,0 +1,9 @@
+# PRASE with MTransE (Chen et al., IJCAI 2017).
+#
+# One PRASE round runs PARIS, trains MTransE on the PARIS matches, and runs PARIS again
+# with MTransE's proposed pairs and embedding similarity. [method] takes the settings of a
+# run file's [method] table (src/prase/config.py). MTransE runs with its default options.
+
+[method]
+name = "prase"
+model = "mtranse"

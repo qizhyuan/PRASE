@@ -1,0 +1,34 @@
+# PRASE with MultiKE (Zhang et al., IJCAI 2019).
+#
+# One PRASE round runs PARIS, trains MultiKE on the PARIS matches, and runs PARIS again
+# with MultiKE's proposed pairs and embedding similarity. [method] takes the settings of a
+# run file's [method] table (src/prase/config.py); `options` are MultiKE's settings.
+
+[method]
+name = "prase"
+model = "multike"
+
+# MultiKE encodes names and attribute values with FastText vectors.
+# "@word_vectors" stands for the file passed to reproduce.py with --word-vectors; a run
+# file of your own names the vector file itself.
+[method.options]
+word_vectors = "@word_vectors"
+
+# Per-dataset MultiKE options, merged over [method].options.
+# MultiKE names an entity by the first of these attributes it has, and otherwise by the
+# local name of its identifier.
+
+# Wikidata identifiers are opaque Q-numbers, so Wikidata entities are named by their
+# Commons category (P373) or title (P1476) and never by their identifier.
+[dataset_options.D-W-100K-V2]
+right_names = ["http://www.wikidata.org/entity/P373", "http://www.wikidata.org/entity/P1476"]
+right_local_names = false
+
+[dataset_options.D-W-15K-V2]
+right_names = ["http://www.wikidata.org/entity/P373", "http://www.wikidata.org/entity/P1476"]
+right_local_names = false
+
+# DBpedia and YAGO entities are named by their preferred label or birth name.
+[dataset_options.D-Y-100K-V2]
+left_names = ["skos:prefLabel", "http://dbpedia.org/ontology/birthName"]
+right_names = ["skos:prefLabel", "http://dbpedia.org/ontology/birthName"]

@@ -9,12 +9,14 @@ import numpy as np
 from prase import KG
 
 
-def graph_pair(size: int = 60, *, seed: int = 0, drop: float = 0.1, named: float = 0.6):
+def graph_pair(size: int = 60, *, seed: int = 0, drop: float = 0.1, named: float = 0.6, merged: bool = False):
     """Two noisy copies of one random graph, with renamed entities and predicates.
 
     About ``named`` of the entities have a unique name literal shared by both
     copies, every entity has a shared year literal, and each copy drops about
-    ``drop`` of the relation triples. Returns ``(left, right, reference)``.
+    ``drop`` of the relation triples. With ``merged``, the right copy gives
+    relations 0 and 1 one name, so both left relations are subrelations of it.
+    Returns ``(left, right, reference)``.
     """
     rng = random.Random(seed)
     edges = {(rng.randrange(size), rng.randrange(4), rng.randrange(size)) for _ in range(4 * size)}
@@ -22,9 +24,9 @@ def graph_pair(size: int = 60, *, seed: int = 0, drop: float = 0.1, named: float
     permutation = list(range(size))
     rng.shuffle(permutation)
 
-    def copy(prefix: str, rename) -> KG:
+    def copy(prefix: str, rename, relation=lambda r: r) -> KG:
         relations = [
-            (f"{prefix}:e{rename(h)}", f"{prefix}:rel{r}", f"{prefix}:e{rename(t)}")
+            (f"{prefix}:e{rename(h)}", f"{prefix}:rel{relation(r)}", f"{prefix}:e{rename(t)}")
             for h, r, t in edges if rng.random() > drop
         ]
         attributes = []
@@ -36,7 +38,7 @@ def graph_pair(size: int = 60, *, seed: int = 0, drop: float = 0.1, named: float
         return KG.from_triples(relations, attributes, entities=[f"{prefix}:e{k}" for k in range(size)], name=prefix)
 
     left = copy("L", lambda entity: entity)
-    right = copy("R", lambda entity: permutation[entity])
+    right = copy("R", lambda entity: permutation[entity], (lambda r: 0 if r == 1 else r) if merged else (lambda r: r))
     reference = np.array(
         [(left.entity_index[f"L:e{e}"], right.entity_index[f"R:e{permutation[e]}"]) for e in range(size)],
         dtype=np.int64,

@@ -1,40 +1,39 @@
 # PRASE
 
-PRASE aligns the entities of two knowledge graphs without labeled pairs. It combines probabilistic reasoning with semantic embeddings ([Qi et al., IJCAI 2021](https://www.ijcai.org/proceedings/2021/278)):
+PRASE aligns the entities of two knowledge graphs without labeled pairs, by combining probabilistic reasoning with semantic embeddings ([Qi et al., IJCAI 2021](https://www.ijcai.org/proceedings/2021/278)).
 
-1. [PARIS](https://doi.org/10.14778/2078331.2078332) (Suchanek et al., VLDB 2011) matches entities, relations, and attributes by probabilistic reasoning over the graphs' facts and equal literals.
-2. An embedding model trains on the confident matches, proposes counterparts for the remaining entities, and scores entity similarity.
-3. A second PARIS pass starts from the proposed pairs and adds the embedding similarity to its evidence.
+## Supported Methods
 
-The package provides:
+| Method | What It Does | Python | Run File `[method]` |
+| --- | --- | --- | --- |
+| PRASE | Runs PARIS, trains an embedding model on the PARIS matches, and runs PARIS again with the model's proposed pairs and similarity | `methods.prase("bootea")` | `name = "prase"`, `model = "bootea"` |
+| PARIS | Matches entities, relations, and attributes by probabilistic reasoning over the graphs' facts and equal literals ([Suchanek et al., VLDB 2011](https://doi.org/10.14778/2078331.2078332)) | `methods.paris()` | `name = "paris"` |
+| Embedding only | Trains an embedding model on labeled seed pairs | `methods.embedding_only("bootea")` | `name = "embedding-only"`, `model = "bootea"` |
 
-- PARIS reasoning with a C++ engine and a NumPy engine that give identical alignments. The PARIS authors publish their Java implementation at [dig-team/PARIS](https://github.com/dig-team/PARIS).
-- Six embedding models in PyTorch: BootEA, GCNAlign, IMUSE, IPTransE, MTransE, and MultiKE.
-- Pipelines built from interchangeable steps, with records of every intermediate alignment and score.
-- Optional manual review: approved pairs stay fixed and rejected pairs are never matched.
-- Benchmark recipes that reproduce the paper's experiments on six datasets.
+PRASE and embedding-only training take any of six embedding models in PyTorch, or [your own](#embedding-models):
 
-The original implementation released with the IJCAI 2021 paper is on the [`legacy`](https://github.com/qizhyuan/PRASE/tree/legacy) branch.
+| Model | Paper | `model` |
+| --- | --- | --- |
+| BootEA | Sun et al., IJCAI 2018 | `"bootea"` |
+| GCNAlign | Wang et al., EMNLP 2018 | `"gcnalign"` |
+| IMUSE | He et al., DASFAA 2019 | `"imuse"` |
+| IPTransE | Zhu et al., IJCAI 2017 | `"iptranse"` |
+| MTransE | Chen et al., IJCAI 2017 | `"mtranse"` |
+| MultiKE | Zhang et al., IJCAI 2019 | `"multike"` |
+
+PARIS runs on a C++ engine or a NumPy engine, which give the same alignments and scores to the last bit, with any number of threads. Every run records its intermediate alignments and scores, and a [manual review](#manual-review) keeps approved pairs and never matches rejected ones.
+
+The PARIS authors publish their Java implementation at [dig-team/PARIS](https://github.com/dig-team/PARIS). The code released with the IJCAI 2021 paper is on the [`legacy`](https://github.com/qizhyuan/PRASE/tree/legacy) branch.
 
 ## PRASEMap Web Application
 
-[PRASEMap](https://prasemap.qizhy.com/) is a web application built on PRASE, first presented as a demo at
-CIKM 2021 ([Qi et al., CIKM 2021](https://doi.org/10.1145/3459637.3481972)). In the browser you can upload
-two graphs or choose a built-in pair, run PARIS or PRASE, and review the matches. Approved and rejected
-pairs carry over to the next run.
+[PRASEMap](https://prasemap.qizhy.com/) is a web application built on PRASE, first presented as a demo at CIKM 2021 ([Qi et al., CIKM 2021](https://doi.org/10.1145/3459637.3481972)). In the browser you can upload two graphs or choose a built-in pair, run PARIS or PRASE, and review the matches. Approved and rejected pairs carry over to the next run.
 
 ## Installation
 
-PRASE requires Python 3.11 or newer. Install it in one of two ways:
-
-- **From PyPI**: a released version with the C++ engine prebuilt. This is the usual choice.
-- **From the repository**: the latest code on `main` or a release by its tag, built on your machine.
-
-Each installs the same `prase` package, so use one or the other. Installing from the repository replaces a PyPI installation in the same environment, and the other way round.
+PRASE requires Python 3.11 or newer. PyPI and the repository install the same `prase` package, so an installation from one replaces the other in the same environment. Building the C++ engine from source requires CMake 3.18+ and a C++17 compiler.
 
 ### From PyPI
-
-Run one of these commands:
 
 ```console
 # PARIS, the pipelines, and the benchmark downloader.
@@ -47,60 +46,55 @@ python -m pip install "prase[rdf]"
 python -m pip install "prase[train,rdf]"
 ```
 
-The wheels for Linux (x86_64 and aarch64), Windows (x64), and macOS (Apple silicon) on Python 3.11 to 3.15 include the compiled PARIS engine. On other platforms pip builds the engine from source, which requires CMake 3.18+ and a C++17 compiler.
+The wheels for Linux (x86_64 and aarch64), Windows (x64), and macOS (Apple silicon) on Python 3.11 to 3.15 include the compiled PARIS engine. On other platforms pip builds the engine from source.
 
 ### From the Repository
 
-Install from the repository instead of PyPI to get changes on `main` that have not been released yet. pip builds the C++ engine, which requires CMake 3.18+ and a C++17 compiler.
+Installing from the repository builds the C++ engine:
 
-Clone the repository, then run one of the install commands:
+```console
+# The latest code on main, straight from GitHub.
+python -m pip install "prase[train] @ git+https://github.com/qizhyuan/PRASE.git"
+# Or a release, by its tag.
+python -m pip install "prase[train] @ git+https://github.com/qizhyuan/PRASE.git@v1.0.1"
+```
+
+A clone also holds the [benchmark recipes](#benchmarks):
 
 ```console
 git clone https://github.com/qizhyuan/PRASE.git
 cd PRASE
-# PARIS with the C++ engine.
-python -m pip install .
-# Or with the embedding models and RDF input.
+# Optional: a release instead of main.
+git switch --detach v1.0.1
+# Build PRASE with the embedding models and RDF input.
 python -m pip install ".[train,rdf]"
-# Or the NumPy engine alone, without building the C++ engine.
+# Or, at a release tag, keep the clone for its recipes and install the prebuilt package of that version.
+python -m pip install "prase[train]==1.0.1"
+# Or install PARIS with the NumPy engine alone, without building the C++ engine.
 python -m pip install . --config-settings wheel.cmake=false
-```
-
-To build a release instead of `main`, switch the clone to its tag before you install:
-
-```console
-git switch --detach v1.0.0
-```
-
-pip can also install from GitHub without a clone. Run one of these:
-
-```console
-# The latest code on main.
-python -m pip install "prase[train] @ git+https://github.com/qizhyuan/PRASE.git"
-# Or a release, by its tag.
-python -m pip install "prase[train] @ git+https://github.com/qizhyuan/PRASE.git@v1.0.0"
 ```
 
 ### GPU Training
 
-Embedding models train on the CPU by default. For GPU training, install the CUDA build of PyTorch that the [PyTorch installer](https://pytorch.org/get-started/locally/) selects for your system first. Then install PRASE with the `train` extra, from PyPI or from the repository. pip keeps the CUDA build because it already meets PRASE's PyTorch requirement.
+Embedding models train on the CPU by default. For GPU training, install the CUDA build of PyTorch that the [PyTorch installer](https://pytorch.org/get-started/locally/) selects for your system first, then PRASE with the `train` extra. pip keeps the CUDA build because it already meets PRASE's PyTorch requirement.
 
 ```console
 # 1. The CUDA build of PyTorch.
 python -m pip install torch --index-url https://download.pytorch.org/whl/cu132
-# 2. PRASE with the embedding models, from PyPI.
+# 2. PRASE with the embedding models.
 python -m pip install "prase[train]"
 ```
 
-The examples below select the GPU with `options={"device": "cuda"}`. Run files take `device = "cuda"` in the model options, and the benchmark runner takes `--device cuda`.
+Select the GPU with `options={"device": "cuda"}` in Python, `options = { device = "cuda" }` in a run file, and `--device cuda` in the benchmark runner.
 
 ## Quick Start
 
-PARIS on two small graphs:
+### Align Two Graphs
 
 ```python
 from prase import KG, methods
 
+# Relation triples (head, predicate, tail) and attribute triples (entity, predicate, value).
 left = KG.from_triples(
     [("l:paris", "capital_of", "l:france")],
     [("l:paris", "name", "Paris"), ("l:france", "name", "France")],
@@ -109,54 +103,60 @@ right = KG.from_triples(
     [("r:paris", "capitalOf", "r:france")],
     [("r:paris", "label", "Paris"), ("r:france", "label", "France")],
 )
+
 result = methods.paris().run(left, right)
-print(result.alignment.to_ids(left, right))
+print(result.alignment.to_ids(left, right))  # [(left ID, right ID, score), ...]
 ```
 
-PRASE and SE on a benchmark dataset, after [signing in to Hugging Face](#benchmarks):
+### Run a Benchmark
+
+After [signing in to Hugging Face](#datasets):
 
 ```python
-from prase import Alignment, load_benchmark, methods
+from prase import load_benchmark, methods
 
 # Download and verify D-W-15K-V2 on first use.
 data = load_benchmark("D-W-15K-V2")
 
 # PRASE: PARIS, BootEA, and PARIS again with BootEA's proposals and embeddings.
-prase = methods.prase("bootea", options={"device": "cuda"})
-result = prase.run(data.left, data.right, reference=data.reference())
-print(result.scores)
+pipeline = methods.prase("bootea", options={"device": "cuda"})
+result = pipeline.run(data.left, data.right, reference=data.reference())
+print(result.scores)  # precision, recall, and F1 of the final alignment
+```
 
-# SE: GCNAlign trains on the first fold's training links and predicts the other entities.
-fold = data.splits[0]
-train = data.reference(fold.train)
-se = methods.embedding_only("gcnalign", options={"device": "cuda"})
-result = se.run(data.left, data.right, seeds=Alignment(train[:, 0], train[:, 1]),
-                reference=data.reference(fold.valid + fold.test))
-print(result.scores)
+The same experiment as a recipe of the paper, from a [clone of the repository](#from-the-repository):
+
+```console
+# Write the run to runs/reproduction/prase-bootea/D-W-15K-V2/ and tabulate it.
+python benchmarks/reproduce.py run --method prase --model bootea --dataset D-W-15K-V2 --device cuda --output runs/reproduction
+python benchmarks/reproduce.py report runs/reproduction
 ```
 
 ## Align Your Own Graphs
 
-Each graph consists of relation triples `head<TAB>predicate<TAB>tail` and optional attribute triples `entity<TAB>predicate<TAB>value`. A TOML run file names the inputs, the method, and the output directory:
+A run file names the graphs, the method, and the output directory. Paths are relative to the run file:
 
 ```toml
 # run.toml
 [input]
-reference = "reference.tsv"  # optional pairs for evaluation
-seeds = "seeds.tsv"          # optional known pairs
+seeds = "seeds.tsv"          # Optional known pairs, one left<TAB>right ID pair per line.
+reference = "reference.tsv"  # Optional pairs that the result is scored against, in the same format.
+# dataset = "path/to/openea-folder"  # Or both graphs from an OpenEA folder, instead of [input.left] and [input.right].
+# benchmark = "D-W-15K-V2"           # Or both graphs from a benchmark dataset.
 
 [input.left]
-relations = "left-relations.tsv"
-attributes = "left-attributes.tsv"
+relations = "left-relations.tsv"    # One head<TAB>predicate<TAB>tail triple per line.
+attributes = "left-attributes.tsv"  # Optional: one entity<TAB>predicate<TAB>value triple per line.
+# rdf = "left.ttl"                  # Or one RDF file, with the rdf extra.
 
 [input.right]
 relations = "right-relations.tsv"
 attributes = "right-attributes.tsv"
 
 [method]
-name = "prase"
-model = "gcnalign"
-options = { device = "cpu" }
+name = "prase"                # "paris", "prase", or "embedding-only"
+model = "gcnalign"            # The embedding model of "prase" and "embedding-only".
+options = { device = "cpu" }  # The model's options.
 
 [output]
 directory = "runs/my-alignment"
@@ -171,22 +171,22 @@ prase evaluate runs/my-alignment/alignment.tsv --dataset path/to/openea-folder
 prase models
 ```
 
-Paths are relative to the run file. Seed and reference files have one `left<TAB>right` pair per line. Every input and method is also available in Python:
+The same run in Python:
 
-| Input | Run File | Python |
-| --- | --- | --- |
-| TSV triples | `relations` and `attributes` in `[input.left]` and `[input.right]` | `KG.from_tsv("left-relations.tsv", "left-attributes.tsv")` |
-| RDF | `rdf = "left.ttl"` in `[input.left]` and `[input.right]` | `KG.from_rdf("left.ttl")` |
-| OpenEA folder | `dataset = "path/to/folder"` in `[input]` | `load_dataset("path/to/folder")` |
-| Benchmark dataset | `benchmark = "D-W-15K-V2"` in `[input]` | `load_benchmark("D-W-15K-V2")` |
+```python
+from prase import Alignment, Dataset, KG, methods, read_links
 
-| Method | `[method]` in a Run File | Python |
-| --- | --- | --- |
-| PARIS | `name = "paris"` | `methods.paris()` |
-| PRASE | `name = "prase"`, `model = "bootea"`, `rounds = 1` | `methods.prase("bootea", rounds=1)` |
-| SE | `name = "embedding-only"`, `model = "gcnalign"`, with `[input].seeds` | `methods.embedding_only("gcnalign")`, run with `seeds=` |
-| STR-Match: edit similarity of names | `name = "str-match"` | `methods.name_match()` |
-| EMB-Match: cosine of averaged name word vectors | `name = "emb-match"`, `word_vectors = "data/wiki-news-300d-1M.vec"` | `methods.name_embedding_match("data/wiki-news-300d-1M.vec")` |
+# KG.from_rdf("left.ttl") reads RDF, and load_dataset("path/to/openea-folder") reads an OpenEA folder.
+left = KG.from_tsv("left-relations.tsv", "left-attributes.tsv")
+right = KG.from_tsv("right-relations.tsv", "right-attributes.tsv")
+seeds = Alignment.read("seeds.tsv", left, right)
+# The reference pairs as an (n, 2) array of entity indices.
+reference = Dataset("mine", left, right, read_links("reference.tsv")).reference()
+
+pipeline = methods.prase("gcnalign", options={"device": "cpu"})
+result = pipeline.run(left, right, seeds=seeds, reference=reference, output="runs/my-alignment")
+print(result.scores)
+```
 
 The output directory holds the final alignment, the run settings, and one folder per step:
 
@@ -196,12 +196,91 @@ runs/my-alignment/
 ├── run.json             settings and per-step scores
 ├── 01-paris/            alignment.tsv, predicates.tsv, step.json
 ├── 02-embed-gcnalign/   proposals.tsv, step.json with the training summary
-└── 03-paris/            alignment.tsv, predicates.tsv, step.json
+├── 03-paris/            alignment.tsv, predicates.tsv, step.json
+└── checkpoint/          finished steps and training state, removed when the run finishes
+```
+
+### Progress and Checkpoints
+
+`prase run` logs each step, each PARIS iteration, and each embedding model's training at most every 30 seconds, with the time elapsed and the time left. Training with early stopping states the epoch cap as an upper bound and the epoch at which it stops if validation stops improving:
+
+```text
+Step 2 of 3 (embed-gcnalign) started
+GCN-Align training: epoch 340 of at most 2000, 2 min 10 s elapsed, at most 10 min 35 s left; validation MRR 0.8123, best 0.8150 at epoch 330, stops at epoch 380 without improvement
+GCN-Align training: 380 epochs in 2 min 25 s (patience exhausted); selected epoch 330 at validation MRR 0.8150 on 512 seed pairs
+Step 2 of 3 (embed-gcnalign) took 146.0 s
+```
+
+In Python, the same lines go to the `prase` logger:
+
+```python
+import logging
+
+import prase.progress
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+prase.progress.INTERVAL_SECONDS = 10  # log every 10 seconds instead of every 30
+```
+
+A run with an output directory saves checkpoints in its `checkpoint` folder: the result of every finished step, and the training state of an embedding model every 10 minutes and when its training finishes. After an interruption, `--resume` continues the run in the same directory with the same result as an uninterrupted run: it reuses every finished step whose settings, files, code, and input are unchanged, and continues training from the last saved epoch.
+
+Every checkpoint carries a SHA-256 digest of its content. A damaged, incomplete, or altered checkpoint is ignored, so its step runs again or its training starts from the first epoch. A finished run removes its checkpoints, so resuming it is an error unless the checkpoints were kept:
+
+```console
+# Continue an interrupted run from its checkpoints.
+prase run run.toml --resume
+# Save training state every 2 minutes and keep the checkpoint folder after the run finishes.
+prase run run.toml --checkpoint-minutes 2 --keep-checkpoints
+# Save no checkpoints.
+prase run run.toml --no-checkpoints
+```
+
+The run file sets the same policy:
+
+```toml
+[output]
+directory = "runs/my-alignment"
+# checkpoints = false        # Save no checkpoints.
+
+[output.checkpoints]
+steps = true                 # Save the result of every finished step.
+training = true              # Save the training state of embedding models.
+training_minutes = 2         # Minutes between training checkpoints; 0 saves after every epoch.
+keep = true                  # Keep the folder after the run finishes, so that --resume reuses every step.
+# directory = "checkpoints"  # Another folder: new, empty, or the checkpoint folder of an earlier run.
+```
+
+A checkpoint folder elsewhere must not contain the output directory. PRASE refuses a checkpoint folder that holds files it did not write, and the cleanup after a run removes only the checkpoints PRASE wrote.
+
+In Python, `CheckpointPolicy` chooses the checkpoints, and `training_checkpoints` protects a model fitted outside a pipeline. It yields the files it saves, which stay until you remove them:
+
+```python
+import numpy as np
+
+from prase import CheckpointPolicy, TrainingData, create_model, methods, training_checkpoints
+
+# left, right, and seeds come from the example above.
+pipeline = methods.prase("bootea", options={"device": "cuda"})
+policy = CheckpointPolicy(training_minutes=2, keep=True)
+result = pipeline.run(left, right, output="runs/my-alignment-bootea", checkpoints=policy)
+# After an interruption: reuse the finished steps and continue training.
+result = pipeline.run(left, right, output="runs/my-alignment-bootea", checkpoints=policy, resume=True)
+
+# Train on the seed pairs; the other entities are the candidates.
+pairs = np.stack((seeds.left, seeds.right), axis=1)
+candidates = (np.setdiff1d(np.arange(left.num_entities), seeds.left),
+              np.setdiff1d(np.arange(right.num_entities), seeds.right))
+data = TrainingData(left, right, pairs, candidates)
+with training_checkpoints("checkpoints", minutes=5) as files:
+    embeddings = create_model("bootea", device="cuda").fit(data, seed=0)
+embeddings.save("bootea.npz")
+for path in files:  # the result is saved, so the finished fit can go
+    path.unlink()
 ```
 
 ### Manual Review
 
-Every method runs without review. To correct an alignment, list approved and rejected pairs in a TSV file and rerun with it into a new output directory:
+To correct an alignment, list approved and rejected pairs in a TSV file and rerun with it into a new output directory. Approved pairs stay fixed, and rejected pairs are never matched:
 
 ```text
 left	right	decision
@@ -210,6 +289,7 @@ http://dbpedia.org/resource/Illinois	http://www.wikidata.org/entity/Q1297	reject
 ```
 
 ```console
+# Or set decisions = "review.tsv" in the run file's [input].
 prase run run.toml --decisions review.tsv --output runs/my-alignment-reviewed
 ```
 
@@ -224,6 +304,8 @@ session.run()
 
 # PARIS matches DBpedia's Illinois to Chicago (Q1297). Illinois (Q1204) is the runner-up.
 illinois = "http://dbpedia.org/resource/Illinois"
+print(session.match(illinois))  # the accepted counterpart and the probability the run recorded
+# Candidate scores repeat the evidence computation on the run's final state.
 for right_id, candidate in session.candidates(illinois, limit=3):
     print(right_id, round(candidate.score, 3))
 
@@ -233,6 +315,121 @@ session.run()
 print(session.matches()[:5])
 ```
 
+## Benchmarks
+
+### Datasets
+
+The benchmark collection [qizhy777/prase-benchmarks](https://huggingface.co/datasets/qizhy777/prase-benchmarks) contains the six datasets of the paper: EN-FR-100K-V2, EN-DE-100K-V2, D-W-100K-V2, D-Y-100K-V2, and D-W-15K-V2 from [OpenEA](https://github.com/nju-websoft/OpenEA), and MED-BBK-9K from [industry-eval-EA](https://github.com/ZihengZZH/industry-eval-EA). Downloads require a Hugging Face account with read access to the collection. PRASE pins a revision of the collection and checks the SHA-256 of every file it downloads. The `hf` command comes with PRASE:
+
+```console
+# Sign in with an access token from https://huggingface.co/settings/tokens.
+hf auth login
+# Download and verify all six datasets into the Hugging Face cache.
+prase download
+# Or download some of them.
+prase download D-W-15K-V2 MED-BBK-9K
+```
+
+MultiKE and the EMB-Match baseline read the English FastText vectors [wiki-news-300d-1M.vec](https://fasttext.cc/docs/en/english-vectors.html):
+
+```console
+# Download the 682 MB archive, extract the vectors into data/, and check their SHA-256.
+prase download --word-vectors
+# Or extract them into another folder.
+prase download --word-vectors --vectors-dir path/to/vectors
+```
+
+### Recipes
+
+The recipes are in the repository, not in the PyPI package. Each method has one config file, and the recipes of the paper are built from them:
+
+```text
+benchmarks/
+├── reproduce.py      runs, lists, and reports the recipes
+├── ijcai2021.toml    the recipes of the IJCAI 2021 paper
+├── prase/            the method configs of PARIS, and of PRASE with each embedding model
+└── supervised/       the method configs of each embedding model trained on labeled pairs
+```
+
+A method config holds a run file's `[method]` table and the method's settings for particular datasets. The `[method]` table works in your own run file, where MultiKE's `"@word_vectors"` becomes the path of the vector file:
+
+```toml
+# benchmarks/prase/bootea.toml
+[method]
+name = "prase"
+model = "bootea"
+
+# BootEA options for the 100K datasets, merged over [method].options.
+[dataset_options]
+EN-FR-100K-V2 = { batch_size = 20000, epsilon = 0.98 }
+```
+
+A recipe names a config and the settings it changes. The paper's name-matching baselines, STR-Match and EMB-Match, define their method in place. The comments at the top of [`ijcai2021.toml`](https://github.com/qizhyuan/PRASE/blob/main/benchmarks/ijcai2021.toml) document every recipe setting.
+
+```toml
+# benchmarks/ijcai2021.toml
+[experiments.prase-bootea-m]
+description = "PRASE with BootEA, proposed pairs only"
+config = "prase/bootea.toml"
+method = { share_embeddings = false }
+```
+
+`benchmarks/reproduce.py` runs each recipe on its datasets and writes the runs to `<output>/<recipe>/<dataset>/`, logging each run's number and the time the suite has left. Pass the same `--output` directory to `list` and `report`. A folder that already holds a run stops the suite unless `--resume` is given. A run is current when it finished with the requested `--seed` and `--device`, the recipe's present settings and evaluation, and the installed PRASE build, NumPy, and PyTorch. With `--resume`, the suite:
+
+- skips the current runs;
+- continues interrupted runs from their checkpoints, and keeps each finished fold of a supervised run that is still current;
+- moves every other finished run in the way, such as a run of an older recipe, build, seed, or device, to `<output>/history/<time>/` and runs it again.
+
+`--rounds` with a recipe's own round count, such as `--rounds 1` for PRASE-BootEA, is the same run as the recipe without it. `list` and `report` mark runs that are not current as historical:
+
+```console
+# PARIS on every dataset.
+python benchmarks/reproduce.py run --method paris --all-datasets --output runs/reproduction
+# PRASE with BootEA and with MultiKE on every dataset.
+python benchmarks/reproduce.py run --method prase --model bootea --all-datasets --device cuda --output runs/reproduction
+python benchmarks/reproduce.py run --method prase --model multike --all-datasets --device cuda --word-vectors data/wiki-news-300d-1M.vec --output runs/reproduction
+# A supervised embedding model: train on each benchmark fold and rank its test links.
+python benchmarks/reproduce.py run --method se --model gcnalign --dataset D-W-15K-V2 --device cuda --output runs/reproduction
+# One recipe by name, such as PRASE-BootEA with proposed pairs only.
+python benchmarks/reproduce.py run --experiment prase-bootea-m --all-datasets --device cuda --output runs/reproduction
+# Every recipe and its status.
+python benchmarks/reproduce.py list --output runs/reproduction
+# Tabulate the completed runs.
+python benchmarks/reproduce.py report runs/reproduction
+# The entire suite in its own directory.
+python benchmarks/reproduce.py run --all --device cuda --word-vectors data/wiki-news-300d-1M.vec --output runs/full-suite
+# Continue the suite after an interruption, or after a recipe changed.
+python benchmarks/reproduce.py run --all --device cuda --word-vectors data/wiki-news-300d-1M.vec --output runs/full-suite --resume
+```
+
+### Results
+
+All runs use PRASE 1.0.1 with seed 0 and train the embedding models on an NVIDIA RTX 5090. Embedding training is not bit-for-bit reproducible, so scores vary slightly from run to run.
+
+F1 of the final alignment of PRASE with one round, and of PARIS alone. The best run on each dataset is in bold. The values in parentheses are reported in the [PRASE paper](https://www.ijcai.org/proceedings/2021/278) (Tables 2 and 4).
+
+| Dataset | PRASE-MTransE | PRASE-IPTransE | PRASE-GCNAlign | PRASE-IMUSE | PRASE-BootEA | PRASE-MultiKE | PARIS |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| EN-FR-100K-V2 | 0.945 (0.938) | 0.950 (0.947) | 0.943 (0.939) | 0.952 (0.941) | 0.952 (0.954) | **0.964** (0.954) | 0.934 (0.926) |
+| EN-DE-100K-V2 | 0.960 (0.956) | 0.963 (0.961) | 0.956 (0.954) | 0.966 (0.959) | 0.965 (0.965) | **0.977** (0.972) | 0.953 (0.948) |
+| D-W-100K-V2 | 0.884 (0.865) | 0.883 (0.873) | 0.873 (0.861) | **0.885** (0.873) | 0.882 (0.890) | 0.872 (0.859) | 0.867 (0.854) |
+| D-Y-100K-V2 | 0.992 (0.989) | 0.992 (0.992) | 0.989 (0.986) | 0.993 (0.992) | 0.995 (0.993) | **0.998** (0.996) | 0.987 (0.983) |
+| D-W-15K-V2 | **0.922** (0.914) | 0.916 (0.910) | 0.906 (0.904) | 0.916 (0.913) | 0.912 (0.923) | 0.910 (0.907) | 0.904 (0.897) |
+| MED-BBK-9K | 0.503 (0.485) | 0.519 (0.517) | 0.516 (0.517) | 0.553 (0.501) | 0.550 (0.557) | **0.719** (0.711) | 0.480 (0.499) |
+
+Hits@1 of each embedding model trained on labeled pairs alone, without PARIS: the mean over the five folds of each OpenEA dataset, where each fold trains on its training links and ranks its test links, and the single split of MED-BBK-9K. The best run on each dataset is in bold. The values in parentheses are reported by [OpenEA](https://www.vldb.org/pvldb/vol13/p2326-sun.pdf) (Sun et al., VLDB 2020, Table 5) and, for MED-BBK-9K, by the PRASE paper (Table 2).
+
+| Dataset | MTransE | IPTransE | GCNAlign | IMUSE | BootEA | MultiKE |
+| --- | --- | --- | --- | --- | --- | --- |
+| EN-FR-100K-V2 | 0.080 (0.090) | 0.181 (0.234) | 0.249 (0.257) | 0.645 (0.461) | 0.624 (0.640) | **0.746** (0.642) |
+| EN-DE-100K-V2 | 0.095 (0.115) | 0.288 (0.346) | 0.372 (0.375) | 0.755 (0.457) | 0.737 (0.739) | **0.770** (0.661) |
+| D-W-100K-V2 | 0.129 (0.148) | 0.293 (0.319) | 0.344 (0.353) | 0.433 (0.431) | **0.739** (0.766) | 0.419 (0.319) |
+| D-Y-100K-V2 | 0.097 (0.100) | 0.390 (0.456) | 0.579 (0.620) | 0.604 (0.629) | 0.858 (0.886) | **0.951** (0.853) |
+| D-W-15K-V2 | 0.235 (0.271) | 0.446 (0.412) | 0.485 (0.506) | 0.555 (0.581) | **0.790** (0.821) | 0.633 (0.495) |
+| MED-BBK-9K | 0.004 (0.002) | 0.098 (0.054) | 0.062 (0.057) | 0.292 (0.186) | 0.279 (0.307) | **0.414** (0.410) |
+
+`python benchmarks/reproduce.py report` also tabulates the suite's feedback ablations, round sweeps, name-matching baselines, and the Hits@1 of each embedding model trained on the PARIS matches.
+
 ## Custom Pipelines and Models
 
 A pipeline is a list of steps. Each step receives the current state (graphs, alignment, proposals, embeddings) and returns an updated copy. One PRASE round is `[ParisStep(), Embed(...), ParisStep()]`:
@@ -240,7 +437,7 @@ A pipeline is a list of steps. Each step receives the current state (graphs, ali
 ```python
 from dataclasses import dataclass, replace
 
-from prase import Embed, ParisConfig, ParisStep, Pipeline
+from prase import Embed, ParisConfig, ParisStep, Pipeline, load_benchmark
 
 
 @dataclass
@@ -253,7 +450,12 @@ class KeepConfident:
         context.report(kept=len(alignment))
         return replace(state, alignment=alignment)
 
+    def checkpoint_key(self):
+        # Optional: what decides the result, so that a resumed run reuses it.
+        return {"minimum": self.minimum}
 
+
+data = load_benchmark("D-W-15K-V2")
 paris = ParisConfig(iterations=10, embedding_weight=0.3)
 pipeline = Pipeline([
     ParisStep(paris),
@@ -263,6 +465,8 @@ pipeline = Pipeline([
 ])
 result = pipeline.run(data.left, data.right, reference=data.reference())
 ```
+
+A resumed run reuses a finished step when the step, its seed, and the state it receives are unchanged, under the same PRASE build, NumPy and PyTorch versions, and PyTorch numeric settings. A custom step takes part through a `checkpoint_key()` method, which returns the step's settings as JSON values, with a digest of every file the step reads, such as `prase.checkpoints.file_digest(path)`. The source of the step's module counts as well. A step without the method runs again on resume, and the steps after it are still reused when its result is unchanged. Custom embedding models and literal matchers follow the same rule: without `checkpoint_key()`, a model trains without checkpoints, and a PARIS step that uses the matcher runs again.
 
 ### Embedding Feedback
 
@@ -292,7 +496,7 @@ embedding_weight = 0.3
 
 ### Literal Matching
 
-PARIS starts from pairs of equal literals. A `literal_matcher` returns other scored pairs of literal indices:
+PARIS starts from pairs of equal literals. A `literal_matcher` replaces that rule: it receives both graphs and returns the starting literal pairs, as an `Alignment` of literal indices with scores between 0 and 1:
 
 ```python
 from prase import Alignment, methods
@@ -306,7 +510,7 @@ def casefold_literals(left, right):
     )
 
 
-result = methods.paris(literal_matcher=casefold_literals).run(left, right)
+result = methods.paris(literal_matcher=casefold_literals).run(data.left, data.right)
 ```
 
 ### Embedding Models
@@ -382,87 +586,6 @@ python -m prase run run.toml
 ```
 
 [`config.py`](https://github.com/qizhyuan/PRASE/blob/main/src/prase/config.py) documents every run-file setting.
-
-## Benchmarks
-
-The benchmark collection [qizhy777/prase-benchmarks](https://huggingface.co/datasets/qizhy777/prase-benchmarks) contains the six datasets of the paper: EN-FR-100K-V2, EN-DE-100K-V2, D-W-100K-V2, D-Y-100K-V2, and D-W-15K-V2 from [OpenEA](https://github.com/nju-websoft/OpenEA), and MED-BBK-9K from [industry-eval-EA](https://github.com/ZihengZZH/industry-eval-EA). PRASE pins a revision of the collection and checks the SHA-256 of every file it downloads. Downloads require a Hugging Face account with read access to the collection. The `hf` command comes with PRASE:
-
-```console
-# Sign in with an access token from https://huggingface.co/settings/tokens.
-hf auth login
-# Download and verify all six datasets into the Hugging Face cache.
-prase download
-# Or download some of them.
-prase download D-W-15K-V2 MED-BBK-9K
-```
-
-MultiKE and EMB-Match read the English FastText vectors [wiki-news-300d-1M.vec](https://fasttext.cc/docs/en/english-vectors.html):
-
-```console
-# Download the 682 MB archive, extract the vectors into data/, and check their SHA-256.
-prase download --word-vectors
-# Or extract them into another folder.
-prase download --word-vectors --vectors-dir path/to/vectors
-```
-
-To fetch the vectors by hand:
-
-```console
-curl -O https://dl.fbaipublicfiles.com/fasttext/vectors-english/wiki-news-300d-1M.vec.zip
-python -m zipfile -e wiki-news-300d-1M.vec.zip data
-```
-
-`benchmarks/reproduce.py` runs the recipes in [`benchmarks/experiments.toml`](https://github.com/qizhyuan/PRASE/blob/main/benchmarks/experiments.toml) and writes each run to `<output>/<experiment>/<dataset>/`. A run stops when its folder already holds a run, so give each reproduction a new `--output` directory and pass the same directory to `list` and `report`.
-
-The scripts are in the repository, not in the PyPI package. Clone the repository and install PRASE in one of two ways, so that the scripts and the package come from the same version:
-
-```console
-# Either: the scripts of the 1.0.0 release, with the prebuilt PyPI package of the same version.
-git clone https://github.com/qizhyuan/PRASE.git
-cd PRASE
-git switch --detach v1.0.0
-python -m pip install "prase[train]==1.0.0"
-```
-
-```console
-# Or: the scripts on main, with PRASE built from the clone.
-git clone https://github.com/qizhyuan/PRASE.git
-cd PRASE
-python -m pip install ".[train]"
-```
-
-Then, in the clone:
-
-```console
-# PARIS on every dataset.
-python benchmarks/reproduce.py run --method paris --all-datasets --output runs/reproduction
-# PRASE with BootEA and with MultiKE on every dataset.
-python benchmarks/reproduce.py run --method prase --model bootea --all-datasets --device cuda --output runs/reproduction
-python benchmarks/reproduce.py run --method prase --model multike --all-datasets --device cuda --word-vectors data/wiki-news-300d-1M.vec --output runs/reproduction
-# SE: train on the benchmark folds and rank the test links.
-python benchmarks/reproduce.py run --method se --model gcnalign --dataset D-W-15K-V2 --output runs/reproduction
-# One recipe by name, such as PRASE-BootEA with proposed pairs only.
-python benchmarks/reproduce.py run --experiment prase-bootea-m --all-datasets --device cuda --output runs/reproduction
-# Every recipe and its status, including the feedback ablations, round sweeps, and name-matching baselines.
-python benchmarks/reproduce.py list --output runs/reproduction
-# Tabulate the completed runs.
-python benchmarks/reproduce.py report runs/reproduction
-# The entire suite in its own directory.
-python benchmarks/reproduce.py run --all --device cuda --word-vectors data/wiki-news-300d-1M.vec --output runs/full-suite
-```
-
-### Results
-
-F1 of the final alignment with one PRASE round, seed 0, and embedding training on an NVIDIA RTX 5090. Embedding training is not bit-for-bit reproducible, so scores vary slightly from run to run. The values in parentheses are from the paper.
-
-| Dataset | PARIS | PRASE-BootEA | PRASE-MultiKE |
-| --- | --- | --- | --- |
-| EN-FR-100K-V2 | 0.933 (0.926) | 0.954 (0.954) | 0.962 (0.954) |
-| EN-DE-100K-V2 | 0.952 (0.948) | 0.966 (0.965) | 0.977 (0.972) |
-| D-W-100K-V2 | 0.864 (0.854) | 0.891 (0.890) | 0.868 (0.859) |
-| D-Y-100K-V2 | 0.986 (0.983) | 0.994 (0.993) | 0.998 (0.996) |
-| D-W-15K-V2 | 0.905 (0.897) | 0.917 (0.923) | 0.911 (0.907) |
-| MED-BBK-9K | 0.498 (0.499) | 0.578 (0.557) | 0.728 (0.711) |
 
 ## Citation
 

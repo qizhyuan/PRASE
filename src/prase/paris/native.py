@@ -2,7 +2,8 @@
 
 Graph indexes are built in NumPy (:class:`~prase.paris.state.GraphIndex`) and
 shared with the extension, so both engines read identical inputs. The
-extension implements :func:`prase.paris.python.PythonEngine.iterate`.
+extension runs the same iteration as
+:meth:`prase.paris.python.PythonEngine.iterate`.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger("prase")
 _LOAD_ERROR: ImportError | None = None
 _REPORTED = False
-_API = 3
+_API = 7
 
 try:
     _paris = import_module(f"{__package__.rpartition('.')[0]}._paris")

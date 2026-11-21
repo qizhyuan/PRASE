@@ -1,0 +1,18 @@
+# BootEA (Sun et al., IJCAI 2018) as a supervised embedding model, without PARIS.
+#
+# The embedding-only method trains BootEA on labeled seed pairs and proposes mutual
+# nearest neighbors as counterparts. [method] takes the settings of a run file's
+# [method] table (src/prase/config.py); `options` are BootEA's settings.
+
+[method]
+name = "embedding-only"
+model = "bootea"
+
+# Per-dataset BootEA options, merged over [method].options, as in prase/bootea.toml.
+# On the 100K datasets, BootEA trains on batches of 20,000 triples and draws hard
+# negatives from the nearest 2% of entities (epsilon 0.98) instead of the nearest 10%.
+[dataset_options]
+EN-FR-100K-V2 = { batch_size = 20000, epsilon = 0.98 }
+EN-DE-100K-V2 = { batch_size = 20000, epsilon = 0.98 }
+D-W-100K-V2 = { batch_size = 20000, epsilon = 0.98 }
+D-Y-100K-V2 = { batch_size = 20000, epsilon = 0.98 }

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from math import ceil, erf, sqrt
 from typing import TYPE_CHECKING
 
+from ..alignment import Alignment
 from ..errors import ConfigError, DataError
 from .base import Embeddings, TrainingData
 from .common import (
@@ -24,7 +25,10 @@ class IPTransE:
     graphs and on two-hop paths composed into a shortcut relation. Every
     ``bootstrap_every`` epochs from ``bootstrap_start``, nearest neighbors with
     a cosine above ``sim_th`` exchange their triples, weighted by that cosine.
-    Rejected pairs never exchange triples.
+    Rejected pairs never exchange triples. Training runs for up to ``epochs``
+    epochs and stops when validation stops improving. With fewer than four
+    seed pairs, too few to validate, it runs for ``unvalidated_epochs``.
+    Proposals are mutual nearest neighbors.
     """
 
     name = "iptranse"
@@ -34,7 +38,8 @@ class IPTransE:
         *,
         device: str = "cpu",
         dim: int = 100,
-        epochs: int = 100,
+        epochs: int = 2000,
+        unvalidated_epochs: int = 100,
         learning_rate: float = 0.01,
         batch_size: int = 5000,
         block_size: int = 512,
@@ -49,6 +54,7 @@ class IPTransE:
         self.device = check_device(device)
         self.dim = positive_int("dim", dim)
         self.epochs = positive_int("epochs", epochs)
+        self.unvalidated_epochs = positive_int("unvalidated_epochs", unvalidated_epochs)
         self.batch_size = positive_int("batch_size", batch_size)
         self.block_size = positive_int("block_size", block_size)
         self.negative_samples = positive_int("negative_samples", negative_samples)
@@ -66,13 +72,18 @@ class IPTransE:
         if self.path_weight < 0 or not 0 <= self.sim_th <= 1:
             raise ConfigError("path_weight must be nonnegative and sim_th must be in [0, 1]")
 
+    def propose(self, embeddings: Embeddings, data: TrainingData) -> Alignment:
+        """Propose mutual nearest neighbors among the candidates."""
+        return embeddings.reciprocal_nearest(*data.candidates, excluded=data.rejected)
+
     def fit(self, data: TrainingData, *, seed: int) -> Embeddings:
         """Train one shared table in which seed pairs are a single entity."""
         if not len(data.seeds):
             raise DataError("IPTransE requires at least one seed pair")
         torch, generator = training_runtime(self.device, seed)
         validation = SeedValidation(torch, data, seed, self.device, self.epochs,
-                                    start=max(10, min(self.bootstrap_start, self.epochs // 2)))
+                                    start=max(10, min(self.bootstrap_start, self.epochs // 2)), model=self,
+                                    unvalidated_epochs=self.unvalidated_epochs)
         data = validation.training
         rows, count = _shared_entity_rows(data)
         row_indices = tuple(torch.tensor(side, dtype=torch.long, device=self.device) for side in rows)
@@ -115,7 +126,9 @@ class IPTransE:
         def encode():
             return tuple(_normalized_rows(torch, entities, side) for side in row_indices)
 
-        for epoch in range(1, self.epochs + 1):
+        optimizers = (optimizer, alignment_optimizer)
+        first = validation.resume(generator, parameters, optimizers, best=encode)
+        for epoch in range(first, self.epochs + 1):
             batch_streams = tuple(_epoch_batches(torch, side, steps, generator) for side in normal)
             for batches in zip(*batch_streams, strict=True):
                 terms = []
@@ -148,6 +161,7 @@ class IPTransE:
                         _step(alignment_optimizer, loss)
             if validation.stop(epoch, encode):
                 break
+            validation.checkpoint(epoch)
         return validation.vectors(encode)
 
     def _prepare_side(self, torch, side, entity_count, predicate_count):
@@ -327,30 +341,55 @@ def _triple_keys(triples, entity_count, predicate_count):
     return (head * predicate_count + predicate) * entity_count + tail
 
 
+_NEGATIVE_TRIALS = 8
+
+
 def _negative_triples(torch, generator, triples, pool, known, entity_count, predicate_count):
-    """Corrupt the head or tail of each triple, retrying observed triples up to eight times."""
+    """Corrupt the head or tail of each triple with an entity of ``pool``, avoiding observed triples.
+
+    Each triple tries up to ``_NEGATIVE_TRIALS`` corruptions and keeps the first
+    one that is a new triple; a triple without one is returned unchanged and
+    marked invalid. On a GPU every trial is drawn at once, so that the GPU never
+    waits on the host; on the CPU, trials stop as soon as every triple has one.
+    """
+    if triples.device.type == "cpu":
+        return _negative_triples_retrying(torch, generator, triples, pool, known, entity_count, predicate_count)
+    trials = triples.expand(_NEGATIVE_TRIALS, -1, -1).clone()
+    shape = (_NEGATIVE_TRIALS, len(triples))
+    columns = torch.randint(2, shape, device=triples.device, generator=generator) * 2
+    replacements = pool[torch.randint(len(pool), shape, device=triples.device, generator=generator)]
+    trials.scatter_(2, columns[..., None], replacements[..., None])
+    accepted = (trials != triples).any(dim=2)
+    if len(known):
+        keys = _triple_keys(trials.reshape(-1, 3), entity_count, predicate_count).reshape(shape)
+        nearest = torch.searchsorted(known, keys).clamp(max=len(known) - 1)
+        accepted &= known[nearest] != keys
+    first = accepted.to(torch.int8).argmax(dim=0)
+    rows = torch.arange(len(triples), device=triples.device)
+    valid = accepted[first, rows]
+    negatives = torch.where(valid[:, None], trials[first, rows], triples)
+    return negatives, valid
+
+
+def _negative_triples_retrying(torch, generator, triples, pool, known, entity_count, predicate_count):
+    """The CPU form of :func:`_negative_triples`, which retries only the unresolved triples."""
     negatives = triples.clone()
-    unresolved = torch.arange(len(triples), device=triples.device)
-    choices = ((0, pool), (2, pool))
-    valid = torch.zeros(len(triples), dtype=torch.bool, device=triples.device)
-    for _ in range(8):
+    unresolved = torch.arange(len(triples))
+    valid = torch.zeros(len(triples), dtype=torch.bool)
+    for _ in range(_NEGATIVE_TRIALS):
         if len(unresolved) == 0:
             break
         trial = triples[unresolved].clone()
-        columns = torch.randint(len(choices), (len(unresolved),), device=triples.device, generator=generator)
-        for option, (column, candidates) in enumerate(choices):
-            chosen = columns == option
-            samples = torch.randint(len(candidates), (len(trial),), device=triples.device, generator=generator)
-            trial[:, column] = torch.where(chosen, candidates[samples], trial[:, column])
-        different = (trial != triples[unresolved]).any(dim=1)
+        columns = torch.randint(2, (len(unresolved),), generator=generator) * 2
+        trial[torch.arange(len(trial)), columns] = pool[torch.randint(len(pool), (len(trial),), generator=generator)]
+        accepted = (trial != triples[unresolved]).any(dim=1)
         if len(known):
             keys = _triple_keys(trial, entity_count, predicate_count)
-            nearest = torch.searchsorted(known, keys).clamp(max=len(known) - 1)
-            different &= known[nearest] != keys
-        resolved = unresolved[different]
+            accepted &= known[torch.searchsorted(known, keys).clamp(max=len(known) - 1)] != keys
+        resolved = unresolved[accepted]
         valid[resolved] = True
-        negatives[resolved] = trial[different]
-        unresolved = unresolved[~different]
+        negatives[resolved] = trial[accepted]
+        unresolved = unresolved[~accepted]
     return negatives, valid
 
 
