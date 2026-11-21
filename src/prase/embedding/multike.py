@@ -457,7 +457,8 @@ class _Training:
         F = self.functional
         for batch in self._batches(self.inputs.relations):
             negatives, valid = self._corrupt(batch)
-            loss = F.softplus(self._translation(batch)).sum() + (F.softplus(-self._translation(negatives)) * valid).sum()
+            loss = F.softplus(self._translation(batch)).sum()
+            loss += (F.softplus(-self._translation(negatives)) * valid).sum()
             loss += self._translation(batch, head=self.shared).sum() + self._translation(batch, tail=self.shared).sum()
             loss += 0.5 * self._name_pull(batch[:, [0, 2]].flatten())
             _step(self.optimizer, loss)

@@ -502,9 +502,10 @@ class ParisStep:
 
     User seeds and proposals initialize entity counterparts. Seeds that are
     rejected or touch an approved entity are left out, so they never displace
-    a proposal. Proposal scores are scaled by ``proposal_weight``. After the configured warmup, PARIS
-    can combine structural scores with embedding cosine similarity. This step
-    clears the proposals and embeddings from the returned state.
+    a proposal. Proposal scores are scaled by ``proposal_weight``. After the
+    configured warmup, PARIS can combine structural scores with embedding
+    cosine similarity. This step clears the proposals and embeddings from the
+    returned state.
 
     ``literal_matcher(left, right)`` returns the scored literal pairs that start
     the reasoning. The default pairs equal values. A resumed run reuses this
@@ -554,9 +555,10 @@ class Embed:
 
     Training pairs come from approvals, user seeds, and current matches that
     meet ``seed_threshold``, without rejected pairs. The first source takes
-    precedence when pairs conflict. Proposal candidates exclude their endpoints. With ``propose``,
-    the model can choose pairs, with nearest neighbors as the default.
-    ``share_embeddings`` retains the vectors in the returned state.
+    precedence when pairs conflict. Proposal candidates exclude the endpoints
+    of training pairs. With ``propose``, the model can choose pairs, with
+    nearest neighbors as the default. ``share_embeddings`` retains the
+    vectors in the returned state.
     """
 
     model: EmbeddingModel | str

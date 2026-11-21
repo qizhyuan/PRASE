@@ -62,7 +62,8 @@ right_names = ["英文名称", "中文名称"]
 
 # PRASE --------------------------------------------------------------------------------
 # One PRASE round, with both feedback channels from the embedding model to PARIS:
-# proposed pairs and embedding similarity. D-W-15K-V2 and MED-BBK-9K also run 2 to 4 rounds.
+# proposed pairs and embedding similarity. PRASE with BootEA and with MultiKE also runs
+# 2 to 4 rounds on D-W-15K-V2 and MED-BBK-9K.
 
 [experiments.prase-bootea]
 description = "PRASE with BootEA, both feedback channels"

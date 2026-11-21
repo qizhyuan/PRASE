@@ -21,7 +21,9 @@ PRASE and embedding-only training take any of six embedding models in PyTorch, o
 | MTransE | Chen et al., IJCAI 2017 | `"mtranse"` |
 | MultiKE | Zhang et al., IJCAI 2019 | `"multike"` |
 
-PARIS runs on a C++ engine or a NumPy engine, which give the same alignments and scores to the last bit, with any number of threads. Every run records its intermediate alignments and scores, and a [manual review](#manual-review) keeps approved pairs and never matches rejected ones. The PARIS authors publish their Java implementation at [dig-team/PARIS](https://github.com/dig-team/PARIS). The implementation released with the IJCAI 2021 paper is on the [`legacy`](https://github.com/qizhyuan/PRASE/tree/legacy) branch.
+PARIS runs on a C++ engine or a NumPy engine, which give the same alignments and scores to the last bit, with any number of threads. Every run records its intermediate alignments and scores, and a [manual review](#manual-review) keeps approved pairs and never matches rejected ones.
+
+The PARIS authors publish their Java implementation at [dig-team/PARIS](https://github.com/dig-team/PARIS). The code released with the IJCAI 2021 paper is on the [`legacy`](https://github.com/qizhyuan/PRASE/tree/legacy) branch.
 
 ## PRASEMap Web Application
 
@@ -29,7 +31,7 @@ PARIS runs on a C++ engine or a NumPy engine, which give the same alignments and
 
 ## Installation
 
-PRASE requires Python 3.11 or newer. PyPI and the repository install the same `prase` package, so an installation from one replaces the other in the same environment.
+PRASE requires Python 3.11 or newer. PyPI and the repository install the same `prase` package, so an installation from one replaces the other in the same environment. Building the C++ engine from source requires CMake 3.18+ and a C++17 compiler.
 
 ### From PyPI
 
@@ -44,11 +46,11 @@ python -m pip install "prase[rdf]"
 python -m pip install "prase[train,rdf]"
 ```
 
-The wheels for Linux (x86_64 and aarch64), Windows (x64), and macOS (Apple silicon) on Python 3.11 to 3.15 include the compiled PARIS engine. On other platforms pip builds the engine from source, which requires CMake 3.18+ and a C++17 compiler.
+The wheels for Linux (x86_64 and aarch64), Windows (x64), and macOS (Apple silicon) on Python 3.11 to 3.15 include the compiled PARIS engine. On other platforms pip builds the engine from source.
 
 ### From the Repository
 
-Installing from the repository builds the C++ engine, which requires CMake 3.18+ and a C++17 compiler:
+Installing from the repository builds the C++ engine:
 
 ```console
 # The latest code on main, straight from GitHub.
@@ -66,9 +68,9 @@ cd PRASE
 git switch --detach v1.0.1
 # Build PRASE with the embedding models and RDF input.
 python -m pip install ".[train,rdf]"
-# Or, on a release, install the prebuilt package of the same version.
+# Or, at a release tag, keep the clone for its recipes and install the prebuilt package of that version.
 python -m pip install "prase[train]==1.0.1"
-# Or PARIS with the NumPy engine alone, without building the C++ engine.
+# Or install PARIS with the NumPy engine alone, without building the C++ engine.
 python -m pip install . --config-settings wheel.cmake=false
 ```
 
@@ -83,7 +85,7 @@ python -m pip install torch --index-url https://download.pytorch.org/whl/cu132
 python -m pip install "prase[train]"
 ```
 
-Python selects the GPU with `options={"device": "cuda"}`, a run file with `options = { device = "cuda" }`, and the benchmark runner with `--device cuda`.
+Select the GPU with `options={"device": "cuda"}` in Python, `options = { device = "cuda" }` in a run file, and `--device cuda` in the benchmark runner.
 
 ## Quick Start
 
@@ -178,6 +180,7 @@ from prase import Alignment, Dataset, KG, methods, read_links
 left = KG.from_tsv("left-relations.tsv", "left-attributes.tsv")
 right = KG.from_tsv("right-relations.tsv", "right-attributes.tsv")
 seeds = Alignment.read("seeds.tsv", left, right)
+# The reference pairs as an (n, 2) array of entity indices.
 reference = Dataset("mine", left, right, read_links("reference.tsv")).reference()
 
 pipeline = methods.prase("gcnalign", options={"device": "cpu"})
@@ -219,7 +222,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 prase.progress.INTERVAL_SECONDS = 10  # log every 10 seconds instead of every 30
 ```
 
-A run with an output directory saves checkpoints in its `checkpoint` folder: the result of every finished step, and the state of an embedding model every 10 minutes of training. After an interruption, `--resume` continues the run in the same directory. It reuses every finished step whose settings, files, code, and input are unchanged, and continues training from the last saved epoch, with the same result as an uninterrupted run. A finished model fit stays saved until its step's result is, so a failure later in the step does not repeat the training. Every checkpoint carries a SHA-256 digest of its content, and one that is damaged, incomplete, or altered is ignored: its step runs again, or its training starts from the first epoch. A finished run removes its checkpoints, so resuming it is an error unless the checkpoints were kept:
+A run with an output directory saves checkpoints in its `checkpoint` folder: the result of every finished step, and the training state of an embedding model every 10 minutes and when its training finishes. After an interruption, `--resume` continues the run in the same directory with the same result as an uninterrupted run: it reuses every finished step whose settings, files, code, and input are unchanged, and continues training from the last saved epoch.
+
+Every checkpoint carries a SHA-256 digest of its content. A damaged, incomplete, or altered checkpoint is ignored, so its step runs again or its training starts from the first epoch. A finished run removes its checkpoints, so resuming it is an error unless the checkpoints were kept:
 
 ```console
 # Continue an interrupted run from its checkpoints.
@@ -245,7 +250,7 @@ keep = true                  # Keep the folder after the run finishes, so that -
 # directory = "checkpoints"  # Another folder: new, empty, or the checkpoint folder of an earlier run.
 ```
 
-A checkpoint folder outside the output directory must not contain it. PRASE refuses a folder that holds files it did not write, and the cleanup after a run removes only the checkpoints PRASE wrote.
+A checkpoint folder elsewhere must not contain the output directory. PRASE refuses a checkpoint folder that holds files it did not write, and the cleanup after a run removes only the checkpoints PRASE wrote.
 
 In Python, `CheckpointPolicy` chooses the checkpoints, and `training_checkpoints` protects a model fitted outside a pipeline. It yields the files it saves, which stay until you remove them:
 
@@ -257,9 +262,9 @@ from prase import CheckpointPolicy, TrainingData, create_model, methods, trainin
 # left, right, and seeds come from the example above.
 pipeline = methods.prase("bootea", options={"device": "cuda"})
 policy = CheckpointPolicy(training_minutes=2, keep=True)
-result = pipeline.run(left, right, output="runs/my-alignment", checkpoints=policy)
+result = pipeline.run(left, right, output="runs/my-alignment-bootea", checkpoints=policy)
 # After an interruption: reuse the finished steps and continue training.
-result = pipeline.run(left, right, output="runs/my-alignment", checkpoints=policy, resume=True)
+result = pipeline.run(left, right, output="runs/my-alignment-bootea", checkpoints=policy, resume=True)
 
 # Train on the seed pairs; the other entities are the candidates.
 pairs = np.stack((seeds.left, seeds.right), axis=1)
@@ -336,17 +341,17 @@ prase download --word-vectors --vectors-dir path/to/vectors
 
 ### Recipes
 
-The recipes are in the repository, not in the PyPI package. Each method has one stable config, and the paper's suite builds its recipes from them:
+The recipes are in the repository, not in the PyPI package. Each method has one config file, and the recipes of the paper are built from them:
 
 ```text
 benchmarks/
 ├── reproduce.py      runs, lists, and reports the recipes
 ├── ijcai2021.toml    the recipes of the IJCAI 2021 paper
-├── prase/            PARIS, and PRASE with each embedding model
-└── supervised/       each embedding model trained on labeled pairs
+├── prase/            the method configs of PARIS, and of PRASE with each embedding model
+└── supervised/       the method configs of each embedding model trained on labeled pairs
 ```
 
-A stable config holds a run file's `[method]` table and the benchmark's per-dataset settings. The `[method]` table works in your own run file, where MultiKE's `"@word_vectors"` becomes the path of the vector file:
+A method config holds a run file's `[method]` table and the method's settings for particular datasets. The `[method]` table works in your own run file, where MultiKE's `"@word_vectors"` becomes the path of the vector file:
 
 ```toml
 # benchmarks/prase/bootea.toml
@@ -369,13 +374,13 @@ config = "prase/bootea.toml"
 method = { share_embeddings = false }
 ```
 
-`benchmarks/reproduce.py` runs each recipe on its datasets and writes the runs to `<output>/<recipe>/<dataset>/`, logging each run's number and the time the suite has left. Pass the same `--output` directory to `list` and `report`. A folder that already holds a run stops the suite unless `--resume` is given. With `--resume`, the suite:
+`benchmarks/reproduce.py` runs each recipe on its datasets and writes the runs to `<output>/<recipe>/<dataset>/`, logging each run's number and the time the suite has left. Pass the same `--output` directory to `list` and `report`. A folder that already holds a run stops the suite unless `--resume` is given. A run is current when it finished with the requested `--seed` and `--device`, the recipe's present settings and evaluation, and the installed PRASE build, NumPy, and PyTorch. With `--resume`, the suite:
 
-- skips current runs of the requested `--seed` and `--device`, which finished with the recipe's present settings and evaluation, the installed PRASE build (its version and the digests of its sources and PARIS extension), and the installed NumPy and PyTorch versions;
-- continues interrupted runs from their checkpoints, and keeps the supervised folds that finished with the same identity;
+- skips the current runs;
+- continues interrupted runs from their checkpoints, and keeps each finished fold of a supervised run that is still current;
 - moves every other finished run in the way, such as a run of an older recipe, build, seed, or device, to `<output>/history/<time>/` and runs it again.
 
-`--rounds` with the recipe's own round count names the recipe's base run. `list` and `report` mark runs that are not current as historical:
+`--rounds` with a recipe's own round count, such as `--rounds 1` for PRASE-BootEA, is the same run as the recipe without it. `list` and `report` mark runs that are not current as historical:
 
 ```console
 # PARIS on every dataset.
@@ -399,7 +404,7 @@ python benchmarks/reproduce.py run --all --device cuda --word-vectors data/wiki-
 
 ### Results
 
-All runs use seed 0 and train the embedding models on an NVIDIA RTX 5090. Embedding training is not bit-for-bit reproducible, so scores vary slightly from run to run.
+All runs use PRASE 1.0.1 with seed 0 and train the embedding models on an NVIDIA RTX 5090. Embedding training is not bit-for-bit reproducible, so scores vary slightly from run to run.
 
 F1 of the final alignment of PRASE with one round, and of PARIS alone. The best run on each dataset is in bold. The values in parentheses are reported in the [PRASE paper](https://www.ijcai.org/proceedings/2021/278) (Tables 2 and 4).
 
@@ -445,7 +450,6 @@ class KeepConfident:
         context.report(kept=len(alignment))
         return replace(state, alignment=alignment)
 
-
     def checkpoint_key(self):
         # Optional: what decides the result, so that a resumed run reuses it.
         return {"minimum": self.minimum}
@@ -462,7 +466,7 @@ pipeline = Pipeline([
 result = pipeline.run(data.left, data.right, reference=data.reference())
 ```
 
-A resumed run reuses a finished step when its identity, its seed, and the state it receives are unchanged, under the same PRASE build and NumPy and PyTorch versions, and, for an embedding model, the same PyTorch default type, matrix-product precision, TF32, and determinism settings. A custom step has an identity only with a `checkpoint_key()` method, which returns the step's settings as JSON values, with a digest of every file the step reads, such as `prase.checkpoints.file_digest(path)`; the identity also covers the source of the step's module. A step without the method runs again on resume, and a later step is reused when the step's new result is the same as before. Custom embedding models and literal matchers follow the same rule: without `checkpoint_key()`, a model trains without checkpoints and a PARIS step with the matcher runs again.
+A resumed run reuses a finished step when the step, its seed, and the state it receives are unchanged, under the same PRASE build, NumPy and PyTorch versions, and PyTorch numeric settings. A custom step takes part through a `checkpoint_key()` method, which returns the step's settings as JSON values, with a digest of every file the step reads, such as `prase.checkpoints.file_digest(path)`. The source of the step's module counts as well. A step without the method runs again on resume, and the steps after it are still reused when its result is unchanged. Custom embedding models and literal matchers follow the same rule: without `checkpoint_key()`, a model trains without checkpoints, and a PARIS step that uses the matcher runs again.
 
 ### Embedding Feedback
 
@@ -492,7 +496,7 @@ embedding_weight = 0.3
 
 ### Literal Matching
 
-PARIS starts from pairs of equal literals. A `literal_matcher` returns other scored pairs of literal indices:
+PARIS starts from pairs of equal literals. A `literal_matcher` replaces that rule: it receives both graphs and returns the starting literal pairs, as an `Alignment` of literal indices with scores between 0 and 1:
 
 ```python
 from prase import Alignment, methods

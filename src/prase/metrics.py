@@ -29,7 +29,9 @@ class Scores:
         return asdict(self)
 
 
-def evaluate(alignment: Alignment, reference: np.ndarray | Iterable[tuple[int, int]], *, threshold: float = 0.0) -> Scores:
+def evaluate(
+    alignment: Alignment, reference: np.ndarray | Iterable[tuple[int, int]], *, threshold: float = 0.0,
+) -> Scores:
     """Precision, recall, and F1 of the pairs scoring at least ``threshold``."""
     gold = _pair_set(reference)
     predicted = alignment.above(threshold).pairs() if threshold > 0 else alignment.pairs()

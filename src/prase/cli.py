@@ -30,8 +30,8 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     run = commands.add_parser("run", help="run the pipeline described by a TOML file")
-    run.add_argument("config", type=Path)
-    run.add_argument("--output", type=Path, help="write results here, replacing [output] directory")
+    run.add_argument("config", type=Path, help="the TOML run file")
+    run.add_argument("--output", type=Path, help="write the results here instead of the run file's [output] directory")
     run.add_argument("--decisions", type=Path, help="approve/reject decisions from a review")
     run.add_argument("--seed", type=int, help="replace the run file's seed")
     run.add_argument("--resume", action="store_true",
@@ -44,7 +44,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--quiet", action="store_true", help="only print the final scores")
 
     evaluate = commands.add_parser("evaluate", help="score an alignment TSV against reference links")
-    evaluate.add_argument("alignment", type=Path)
+    evaluate.add_argument("alignment", type=Path, help="an alignment TSV, such as a run's alignment.tsv")
     evaluate.add_argument("--dataset", type=Path, required=True, help="OpenEA-layout folder of the two graphs")
     evaluate.add_argument("--reference", type=Path, help="links file; defaults to the dataset's ent_links")
 

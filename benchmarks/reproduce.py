@@ -821,7 +821,8 @@ def main(argv: list[str] | None = None) -> int:
     list_parser.add_argument("--dataset", action="append", choices=BENCHMARK_NAMES)
 
     check_parser = commands.add_parser("check", help="verify local copies of the benchmark datasets")
-    check_parser.add_argument("--data", type=Path, required=True, help="directory containing the local benchmark copies")
+    check_parser.add_argument("--data", type=Path, required=True,
+                              help="directory containing the local benchmark copies")
     check_parser.add_argument("--word-vectors", type=Path, help="also check the word vector file")
 
     run_parser = commands.add_parser("run", help="run benchmarks and record measured results")
@@ -836,9 +837,10 @@ def main(argv: list[str] | None = None) -> int:
     selection.add_argument("--all-datasets", action="store_true", help="use each recipe's configured datasets")
     run_parser.add_argument("--data", type=Path, help="use verified local benchmark copies")
     run_parser.add_argument("--output", type=Path, default=RUNS, help=f"where to write runs (default {RUNS})")
-    run_parser.add_argument("--seed", type=int, default=0)
+    run_parser.add_argument("--seed", type=int, default=0, help="random seed of every run (default 0)")
     run_parser.add_argument("--rounds", type=int, help="override the number of PRASE rounds")
-    run_parser.add_argument("--include-rounds", action="store_true", help="include each recipe's configured round sweeps")
+    run_parser.add_argument("--include-rounds", action="store_true",
+                            help="include each recipe's configured round sweeps")
     run_parser.add_argument("--fold", type=int, help="select one SE fold (default all)")
     run_parser.add_argument("--device", help="embedding model device, such as cuda")
     run_parser.add_argument("--word-vectors", type=Path, help="FastText vectors, for MultiKE and EMB-Match")
